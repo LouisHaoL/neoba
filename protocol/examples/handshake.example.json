@@ -1,0 +1,17 @@
+{
+  "method": "session.init",
+  "params": {
+    "protocol": "1.0",
+    "role": "orchestrator",
+    "principal": {
+      "tenant": "default",
+      "session": "sess-8f3a"
+    },
+    "harness": "claude-code",
+    "capabilities": {
+      "broadcast": false,
+      "async_events": true,
+      "interactive_approval": true
+    }
+  }
+}

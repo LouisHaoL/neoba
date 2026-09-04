@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/common.schema.json",
+  "title": "neoba 协议公共定义",
+  "description": "跨 schema 共享的基础定义:协议版本、时间、cap id、agent_id、scope 枚举等。其余 schema 一律经 $id 引用本文件,不重复定义。依据:neoba-design-v0.1.md §3。",
+  "$defs": {
+    "protocol": {
+      "type": "string",
+      "const": "1.0",
+      "description": "协议版本字段,冻结为 \"1.0\"(§3:protocol: \"1.0\")"
+    },
+    "spec_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+(\\.\\d+)?$",
+      "description": "结构体规格版本(§3 总则:所有结构体首层含 protocol 与 spec_version)"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+      "description": "时间戳,一律 RFC3339 UTC(必须以 Z 结尾,含 ttl;§3 总则通用 Schema 约定),如 2026-09-04T18:00:00Z"
+    },
+    "cap_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*:[a-z0-9][a-z0-9._-]*$",
+      "description": "能力 ID,格式 <命名空间>:<名称>,如 mcp:github、fs:workdir(§3.1)"
+    },
+    "cap_id_or_wildcard": {
+      "anyOf": [
+        { "$ref": "#/$defs/cap_id" },
+        { "const": "*" },
+        { "type": "string", "pattern": "^[a-z][a-z0-9-]*:\\*$" }
+      ],
+      "description": "匹配列表元素(§3 总则通用 Schema 约定):精确 cap id;\"*\" 仅整串通配;前缀通配必须用显式语法 \"mcp:*\"(= 命中该命名空间全部 cap),匹配规则写死,不允许实现自定义模糊匹配"
+    },
+    "identifier_or_wildcard": {
+      "type": "string",
+      "pattern": "^(\\*|[A-Za-z0-9][A-Za-z0-9._-]*(/\\*)?)$",
+      "description": "模型名或通配(用于 allowed_models 等):精确名(如 glm-4.7-air);\"*\" 仅整串通配;\"provider/*\" 形式前缀通配按同一写死的规则匹配,不允许自定义模糊匹配(§3 总则)"
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Agent 实例 ID,格式 <task>/<实例名>,如 task-42/e2e-tester-01(§3.3)"
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "description": "编排节点 ID,如 plan、impl、test(§3.5)"
+    },
+    "artifact_name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "description": "工件名,如 test_report(§3.5/§3.7)"
+    },
+    "artifact_ref": {
+      "type": "string",
+      "pattern": "^artifact:[a-z][a-z0-9_-]*$",
+      "description": "工件引用,格式 artifact:<工件名>,如 artifact:test_report(§3.4 msg.feedback.ref)"
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["read", "write", "admin", "ro", "rw"],
+      "description": "授予范围。文档中 MCP 类能力用 read/write/admin(§3.1),fs 路径类用 ro/rw(§3.1/§3.3);文档未给出 per-kind 映射表,此处冻结为并集枚举,按 kind 的合法组合校验留给 PlanCheck(见 README 模糊点 2)"
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["low", "medium", "high"],
+      "description": "能力风险等级(§3.1)"
+    },
+    "cap_kind": {
+      "type": "string",
+      "enum": ["mcp_server", "skill", "fs_path", "model"],
+      "description": "能力类别(§3.1)"
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["fast", "standard", "heavy"],
+      "description": "基座无关的模型抽象档位(§3.2/§3.9)"
+    },
+    "base": {
+      "type": "string",
+      "enum": ["any", "claude-code", "codex", "opencode"],
+      "description": "基座偏好(§3.2)"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+[smhd]$",
+      "description": "时长,如 2h(§3.3 tool.request.duration)"
+    },
+    "io_type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.:-]*$",
+      "description": "io_contract 类型标识,如 file:markdown、dir(§3.2)"
+    },
+    "output_binding": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+\\.outputs\\.[a-z0-9_-]+$",
+      "description": "契约式边绑定:<节点>.outputs.<工件名>,如 plan.outputs.split_plan(§3.5b/§3.7)"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "工件内容哈希,小写十六进制 SHA-256(§1.4 产物即证据 / §3.7)"
+    },
+    "secret_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]*$",
+      "description": "凭据引用 ID(§3.8):grant manifest 与预设只引用 secret id,任何协议结构体禁止凭据明文;SecretStore 按 tenant 分桶。文档未给字面格式,从严冻结为小写标识符(见 README 模糊点)"
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1,
+      "default": "default",
+      "description": "四层 principal 之 tenant(§2/§10.4):单人部署恒 \"default\";P1–P2 单 tenant 单 session"
+    }
+  }
+}

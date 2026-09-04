@@ -1,0 +1,33 @@
+{
+  "api": "workflow/1.0",
+  "intent_ref": "intent-001",
+  "nodes": [
+    { "id": "plan", "preset": "planner/tech-split" },
+    {
+      "id": "impl",
+      "preset": "coder/backend",
+      "inputs": [{ "from": "plan.outputs.split_plan" }],
+      "timeout": 3600,
+      "retry": { "max": 1, "on": ["crash"] }
+    },
+    {
+      "id": "test",
+      "preset": "e2e-tester",
+      "inputs": [{ "from": "impl.outputs.patch" }]
+    }
+  ],
+  "outputs": [
+    { "from": "test.outputs.test_report", "required": true }
+  ],
+  "feedback": [
+    { "from": "test", "to": "impl", "max_traversals": 2 }
+  ],
+  "evidence": [
+    {
+      "node": "test",
+      "artifact": "test_report",
+      "must_exist": true,
+      "sha256_recorded": true
+    }
+  ]
+}

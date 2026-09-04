@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/handshake.schema.json",
+  "title": "3.0 握手与版本协商(session.init)",
+  "description": "任何接入方(bind 侧)与 daemon 建立会话时先握手,语义仿照 MCP initialize。顶层 oneOf:session.init 请求 / daemon 应答(应答含 daemon 版本、可选能力集与降级说明)。",
+  "oneOf": [
+    { "$ref": "#/$defs/sessionInitRequest" },
+    { "$ref": "#/$defs/sessionInitResponse" }
+  ],
+  "$defs": {
+    "clientCapabilities": {
+      "type": "object",
+      "description": "接入方声明自身支持的可选能力;daemon 据此决定降级路径(§3.0 示例)",
+      "properties": {
+        "broadcast": {
+          "type": "boolean",
+          "description": "是否支持广播消息(msg.broadcast);不支持则 daemon 降级为逐个 msg.direct"
+        },
+        "async_events": {
+          "type": "boolean",
+          "description": "是否支持异步事件流(SSE /events)"
+        },
+        "interactive_approval": {
+          "type": "boolean",
+          "description": "能力审批请求能否实时推给本接入方"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sessionInitRequest": {
+      "type": "object",
+      "description": "session.init 请求(§3.0 v0.2 示例原文)",
+      "required": ["method", "params"],
+      "properties": {
+        "method": { "const": "session.init" },
+        "params": {
+          "type": "object",
+          "required": ["protocol", "role", "principal", "harness", "capabilities"],
+          "properties": {
+            "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+            "role": {
+              "type": "string",
+              "enum": ["orchestrator", "planner", "observer"],
+              "description": "接入方角色:主控 / Planner / 观察者(dashboard 等只读方)"
+            },
+            "principal": {
+              "type": "object",
+              "description": "四层身份(tenant → session → task → agent)随握手声明的前两层(§3.0 v0.2);后两层由任务/实例 ID 天然承载",
+              "required": ["tenant", "session"],
+              "properties": {
+                "tenant": {
+                  "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/tenant_id",
+                  "description": "单人部署恒 \"default\"(§10.4)"
+                },
+                "session": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "orchestrator session 标识,如 sess-8f3a"
+                }
+              },
+              "additionalProperties": false
+            },
+            "harness": {
+              "type": "string",
+              "minLength": 1,
+              "description": "主控 harness 标识,如 claude-code(§2 主控层可替换)"
+            },
+            "capabilities": { "$ref": "#/$defs/clientCapabilities" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "sessionInitResponse": {
+      "type": "object",
+      "description": "daemon 应答:回以自身版本、可选能力集、kind→版本映射与降级说明(§3.0;字段级定义为最小冻结,见 README 模糊点)",
+      "required": ["protocol", "daemon_version", "capabilities", "document_kinds", "degradations"],
+      "properties": {
+        "protocol": {
+          "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol",
+          "description": "协议版本,semver。版本兼容策略(§3.0 v0.2):接收方必须忽略未知字段;仅新增字段/新增可选能力 = minor;删除字段、变更字段语义、收紧默认行为 = major"
+        },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "daemon_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "daemon 参考实现的版本号(semver);daemon 与绑定层支持相邻两个 major(§3.0 v0.2)"
+        },
+        "capabilities": {
+          "type": "object",
+          "description": "daemon 侧可选能力集(与本端能力同构,逐项给出支持与否)",
+          "properties": {
+            "broadcast": { "type": "boolean" },
+            "async_events": { "type": "boolean" },
+            "interactive_approval": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "document_kinds": {
+          "type": "object",
+          "description": "kind→版本映射协商(§3.0 v0.2 补充):daemon 支持的各文档类 kind 及其支持版本列表;文档类不匹配时按 kind 报告(见 errors),不报协议级不匹配",
+          "required": ["preset", "intent", "workflow", "artifact-manifest"],
+          "properties": {
+            "preset": { "$ref": "#/$defs/documentKindVersions" },
+            "intent": { "$ref": "#/$defs/documentKindVersions" },
+            "workflow": { "$ref": "#/$defs/documentKindVersions" },
+            "artifact-manifest": { "$ref": "#/$defs/documentKindVersions" }
+          },
+          "additionalProperties": false
+        },
+        "errors": {
+          "type": "array",
+          "description": "错误结构:文档类版本不匹配按 kind 报告(kind + 期望版本 + 支持列表)",
+          "items": { "$ref": "#/$defs/documentKindMismatchError" }
+        },
+        "degradations": {
+          "type": "array",
+          "description": "降级说明:因任一侧能力缺失而启用降级路径的逐项说明",
+          "items": {
+            "type": "object",
+            "required": ["feature", "reason"],
+            "properties": {
+              "feature": {
+                "type": "string",
+                "enum": ["broadcast", "async_events", "interactive_approval"]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "降级原因与替代路径,如 \"接入方不支持广播,广播降级为逐个点对点投递\""
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "documentKindVersions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^\\d+\\.\\d+$",
+        "description": "该 kind 支持的 major.minor 版本,如 \"1.0\""
+      }
+    },
+    "documentKindMismatchError": {
+      "type": "object",
+      "description": "文档类版本不匹配错误(§3.0 v0.2 补充):按 kind 报告,不报协议级不匹配",
+      "required": ["code", "kind", "expected", "supported"],
+      "properties": {
+        "code": { "const": "document_kind_version_mismatch" },
+        "kind": {
+          "type": "string",
+          "enum": ["preset", "intent", "workflow", "artifact-manifest"]
+        },
+        "expected": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+$",
+          "description": "提交方期望的版本(来自文档 api 字段)"
+        },
+        "supported": { "$ref": "#/$defs/documentKindVersions" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

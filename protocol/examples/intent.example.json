@@ -1,0 +1,14 @@
+{
+  "api": "intent/1.0",
+  "goal": "为订单模块新增优惠券功能并通过全部测试",
+  "acceptance": [
+    "pytest tests/ 全绿",
+    "新字段有迁移脚本"
+  ],
+  "constraints": {
+    "max_parallel": 3,
+    "budget_tokens": 2000000,
+    "forbidden_caps": ["mcp:prod-db"],
+    "allowed_models": ["*"]
+  }
+}

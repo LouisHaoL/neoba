@@ -1,0 +1,20 @@
+# Agent 预设示例(来自设计文档 §3.2,作为 presets/ 目录约定样例)
+api: preset/1.0
+name: e2e-tester
+description: "端到端测试执行者:跑 Playwright 用例并输出报告"
+base: any                        # any | claude-code | codex | opencode
+model:
+  tier: standard                 # fast | standard | heavy(经 Model Score Registry 解析,§3.9)
+  fallback: [standard, fast]
+skills:
+  - playwright-basics
+baseline_grants:                 # 基线授予(见 §3.3)
+  - { cap: fs:workdir, scope: rw }
+  - { cap: mcp:playwright, scope: write }
+io_contracts:                    # 与编排契约对应(见 §3.5)
+  inputs:  [{ name: test_plan, type: file:markdown }]
+  outputs: [{ name: test_report, type: file:markdown },
+            { name: artifacts, type: dir }]
+escalation_policy:               # 升级申请默认策略(可被主控会话覆盖)
+  auto_approve: []
+  require_approval: ["*"]

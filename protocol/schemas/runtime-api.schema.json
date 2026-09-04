@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/runtime-api.schema.json",
+  "description": "每个容器由 supervisor sidecar 暴露统一观测接口:GET /status(七态)、GET /progress(当前步骤、token 消耗、已产出工件含 sha256、最近错误)、GET /events(SSE 统一事件流,主控\"跟踪反馈\"消费此流,不轮询)。统一事件由基座 Adapter 负责归一化,上层不认基座。顶层 oneOf:status / progress / 单条事件。",
+  "title": "3.6 Runtime API(容器观测规范)",
+  "oneOf": [
+    { "$ref": "#/$defs/statusReport" },
+    { "$ref": "#/$defs/progressReport" },
+    { "$ref": "#/$defs/event" }
+  ],
+  "$defs": {
+    "statusReport": {
+      "type": "object",
+      "description": "GET /status 应答:容器生命周期七态",
+      "required": ["protocol", "spec_version", "status"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "agent_id": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/agent_id" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "provisioning", "running", "waiting_feedback", "blocked", "completed", "failed"],
+          "description": "七态:待启动 / 供给中 / 运行中 / 等待反馈(waiting_feedback 对应有界反馈打回期间) / 受阻 / 已完成 / 失败"
+        }
+      },
+      "additionalProperties": false
+    },
+    "progressReport": {
+      "type": "object",
+      "description": "GET /progress 应答:当前步骤、token 消耗、已产出工件(含 sha256)、最近错误(字段名为按中文描述的最小冻结,见 README 模糊点 10)",
+      "required": ["protocol", "spec_version", "artifacts"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "agent_id": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/agent_id" },
+        "step": {
+          "type": "string",
+          "description": "当前步骤描述"
+        },
+        "tokens_in": { "type": "integer", "minimum": 0, "description": "累计输入 token" },
+        "tokens_out": { "type": "integer", "minimum": 0, "description": "累计输出 token" },
+        "artifacts": {
+          "type": "array",
+          "description": "已产出工件(含 sha256)",
+          "items": { "$ref": "#/$defs/artifactRecord" }
+        },
+        "last_error": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string" }
+          ],
+          "description": "最近错误,无错误显式为 null——字段省略 = 未提供,不等于 null(§3 总则可空语义),故必填"
+        }
+      },
+      "additionalProperties": false
+    },
+    "artifactRecord": {
+      "type": "object",
+      "required": ["name", "sha256"],
+      "properties": {
+        "name": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/artifact_name" },
+        "sha256": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "description": "GET /events(SSE)统一事件:五种事件之一。根类型:信封类(§3 总则决议)——首层 protocol + spec_version。基座 Adapter 负责把各家输出翻译成它(§4 事件归一化);事件流为唯一事实源(§3.6 v0.2),禁止采信模型自述",
+      "oneOf": [
+        { "$ref": "#/$defs/eventToolCall" },
+        { "$ref": "#/$defs/eventMessageDelta" },
+        { "$ref": "#/$defs/eventArtifactReady" },
+        { "$ref": "#/$defs/eventUsage" },
+        { "$ref": "#/$defs/eventError" }
+      ]
+    },
+    "eventToolCall": {
+      "type": "object",
+      "description": "工具调用事件,如 { event: tool_call, ts, agent, tool, args_digest }",
+      "required": ["protocol", "spec_version", "event", "ts", "agent", "tool", "args_digest"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "event": { "const": "tool_call" },
+        "ts": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/timestamp" },
+        "agent": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/agent_id" },
+        "tool": { "type": "string", "minLength": 1 },
+        "args_digest": {
+          "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/sha256",
+          "description": "参数摘要(事件流不回传全量参数);摘要算法统一 sha256,不给实现留选择(§3 总则通用 Schema 约定)。凭据值强制脱敏:不含 secret 内容(§3.8)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "eventMessageDelta": {
+      "type": "object",
+      "description": "文本增量事件,如 { event: message_delta, ts, text }",
+      "required": ["protocol", "spec_version", "event", "ts", "text"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "event": { "const": "message_delta" },
+        "ts": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/timestamp" },
+        "text": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "eventArtifactReady": {
+      "type": "object",
+      "description": "工件就绪事件,如 { event: artifact_ready, ts, name: test_report, sha256 };与编排 evidence 双重校验(§3.7)",
+      "required": ["protocol", "spec_version", "event", "ts", "name", "sha256"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "event": { "const": "artifact_ready" },
+        "ts": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/timestamp" },
+        "name": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/artifact_name" },
+        "sha256": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "eventUsage": {
+      "type": "object",
+      "description": "用量事件,如 { event: usage, ts, tokens_in, tokens_out, cost_estimate };§3.5f 预算 ledger 聚合此事件做 soft/hard limit 熔断",
+      "required": ["protocol", "spec_version", "event", "ts", "tokens_in", "tokens_out", "cost_estimate"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "event": { "const": "usage" },
+        "ts": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/timestamp" },
+        "tokens_in": { "type": "integer", "minimum": 0 },
+        "tokens_out": { "type": "integer", "minimum": 0 },
+        "cost_estimate": {
+          "anyOf": [
+            { "type": "number", "minimum": 0 },
+            { "type": "null" }
+          ],
+          "description": "成本估算;订阅制基座下显式为 null——字段省略 = 未提供,不等于 null(§3 总则可空语义),故必填 nullable。token 计量语义 = sidecar 尽力上报 + daemon 估算硬切,不是精确计费(§3.5f)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "eventError": {
+      "type": "object",
+      "description": "错误事件,如 { event: error, ts, kind: harness_crash, detail }",
+      "required": ["protocol", "spec_version", "event", "ts", "kind", "detail"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "event": { "const": "error" },
+        "ts": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/timestamp" },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "description": "错误类别,如 harness_crash(枚举待 v0.2 定稿,现开放为字符串)"
+        },
+        "detail": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/grant-manifest.schema.json",
+  "title": "3.3 授予清单(Grant Manifest)与能力审批流",
+  "description": "grant manifest = 某个 Agent 实例实际持有的能力,是挂载的唯一事实来源(物理性:未授予的能力在容器内不存在)。顶层 oneOf:授予清单本体 / 子 Agent 反向发送的升级申请 tool.request。安全不变量:物理性、最小化、可审计。",
+  "oneOf": [
+    { "$ref": "#/$defs/grantManifest" },
+    { "$ref": "#/$defs/toolRequest" }
+  ],
+  "$defs": {
+    "grantManifest": {
+      "type": "object",
+      "description": "某 Agent 实例的能力授予清单(挂载的唯一事实来源)",
+      "required": ["protocol", "spec_version", "agent_id", "grants", "audit"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "agent_id": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/agent_id" },
+        "grants": {
+          "type": "array",
+          "description": "当前实际持有的授予条目(含基线授予与升级授予)",
+          "items": { "$ref": "#/$defs/grant" }
+        },
+        "audit": {
+          "type": "array",
+          "description": "审计日志:申请、审批、挂载、回收全量进审计(§3.3 第 5 步);主控验收时可看到该 Agent 全部超越基线的能力使用记录",
+          "items": { "$ref": "#/$defs/auditEntry" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "grant": {
+      "type": "object",
+      "description": "单条授予:cap + scope + 来源 + TTL + 约束",
+      "required": ["cap", "scope", "source", "ttl"],
+      "properties": {
+        "cap": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/cap_id" },
+        "scope": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/scope" },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "授予来源:baseline(基线)或 escalation:<req_id>(升级申请),如 \"escalation:req-7\""
+        },
+        "ttl": {
+          "anyOf": [
+            { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/timestamp" },
+            { "type": "null" }
+          ],
+          "description": "过期时间(RFC3339 UTC);所有临时授权带 TTL,到期自动回收。基线授予显式为 null——字段省略 = 未提供,不等于 null(§3 总则可空语义),故必填"
+        },
+        "constraint": {
+          "type": "object",
+          "description": "授予约束:授权可窄于申请(申请 fs:rw,只授 workdir 子目录)。键名开放,文档示例键:fs_scope_narrowed_to(路径模板值)。凭据只允许经 secret id 引用,任何协议结构体禁止凭据明文(§3.8)",
+          "properties": {
+            "fs_scope_narrowed_to": {
+              "type": "string",
+              "description": "fs 授权收窄到的路径,如 ${task.workdir}/screenshots"
+            },
+            "secret_ids": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/secret_id" },
+              "description": "本授予关联的凭据引用(§3.8):仅 secret id,值由 SecretStore 按 tenant 分桶注入被授予容器,绝不跨任务注入"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "auditEntry": {
+      "type": "object",
+      "description": "审计事件。审计日志 = §6 事件日志,同一份(v0.2 事件溯源定版)。event 枚举按 §3.3 正文生命周期词(申请/审批/拒绝/授予/挂载/卸载/到期/回收)+ 示例字面值 granted 冻结,见 README 模糊点 3",
+      "required": ["event", "cap", "by", "decision_source", "at"],
+      "properties": {
+        "event": {
+          "type": "string",
+          "enum": ["requested", "approved", "rejected", "granted", "mounted", "unmounted", "expired", "reclaimed"],
+          "description": "审计事件类型"
+        },
+        "cap": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/cap_id" },
+        "by": {
+          "type": "string",
+          "minLength": 1,
+          "description": "操作主体,如 orchestrator / daemon"
+        },
+        "decision_source": {
+          "type": "string",
+          "pattern": "^(auto_rule:[^\\s]+|manual:[^\\s]+)$",
+          "description": "决策来源(§3.3 v0.2,每条审批记录必填):auto_rule:{id}(分层合并后命中的自动放行规则,如 auto_rule:default-low)或 manual:{principal}(人工审批主体)。自动放行同样全量入审计——调参依据是\"默认规则放行次数 × 事后问题率\";协议层硬底线(high-risk + write/admin)禁止 auto_rule 放行,不可被任何层级覆盖"
+        },
+        "at": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/timestamp" },
+        "req_id": {
+          "type": "string",
+          "description": "关联的升级申请 ID(如有)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "toolRequest": {
+      "type": "object",
+      "description": "子 Agent 经消息通道反向发送的升级申请(§3.3 第 2 步);主控按策略三级处理:自动放行清单 / 逐条审批 / 拒绝。根类型:信封类(§3 总则决议)——首层 protocol + spec_version",
+      "required": ["protocol", "spec_version", "type", "from", "req_id", "cap", "reason", "scope", "duration"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "type": { "const": "tool.request" },
+        "from": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/agent_id" },
+        "req_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "申请 ID,如 req-7;审批结果经 grant 的 source=escalation:<req_id> 回链"
+        },
+        "cap": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/cap_id" },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "申请理由,如 \"需要截图验证登录流程渲染结果\""
+        },
+        "scope": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/scope" },
+        "duration": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/duration" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

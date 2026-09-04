@@ -1,0 +1,11 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "type": "tool.request",
+  "from": "task-42/e2e-tester-01",
+  "req_id": "req-7",
+  "cap": "mcp:mcp-server-browser",
+  "reason": "需要截图验证登录流程渲染结果",
+  "scope": "write",
+  "duration": "2h"
+}

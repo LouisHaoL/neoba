@@ -1,0 +1,29 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "capabilities": [
+    {
+      "id": "mcp:github",
+      "kind": "mcp_server",
+      "description": "GitHub 仓库/issue/PR 读写",
+      "tools": ["create_pr", "list_issues"],
+      "risk_level": "medium",
+      "grantable_scopes": ["read", "write", "admin"]
+    },
+    {
+      "id": "fs:workdir",
+      "kind": "fs_path",
+      "description": "任务工作目录",
+      "grantable_scopes": ["ro", "rw"],
+      "path_template": "${task.workdir}"
+    },
+    {
+      "id": "mcp:mcp-server-browser",
+      "kind": "mcp_server",
+      "description": "浏览器操作:页面截图/交互验证渲染结果",
+      "tools": ["navigate", "screenshot"],
+      "risk_level": "medium",
+      "grantable_scopes": ["read", "write"]
+    }
+  ]
+}

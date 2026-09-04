@@ -1,0 +1,113 @@
+{
+  "api": "scenario/1.0",
+  "scenario": "02-artifact-chain",
+  "description": "工件链:建任务 → 发布文件型与目录型工件各一 → resolve/read 回读。断言 sha256(CAS 根哈希,发布即落账)与 artifact.published 事件;§1.4 产物即证据:子 Agent 声称完成但哈希不匹配 = 未完成。",
+  "protocol_refs": [
+    "§3.7 交付契约(工件仓库 = CAS,发布 = 写屏障)",
+    "§1.4 产物即证据",
+    "§3.6 唯一事实源原则"
+  ],
+  "steps": [
+    {
+      "name": "握手",
+      "call": "session.init",
+      "params": {
+        "protocol": "1.0",
+        "role": "orchestrator",
+        "principal": { "tenant": "default", "session": "orch-2" },
+        "harness": "golden-harness",
+        "capabilities": { "broadcast": true }
+      },
+      "expect": { "result": { "session": { "session": "orch-2" } } }
+    },
+    {
+      "name": "建任务(minimal 预设)",
+      "call": "task.create",
+      "params": { "intent": "产出测试报告工件", "preset": "minimal", "session": "orch-2" },
+      "capture": { "TASK": "result.task_id", "AGENT": "result.agent_id" },
+      "expect": { "result": { "status": "completed" } }
+    },
+    {
+      "name": "发布文件型工件(17 字节 UTF-8)",
+      "call": "artifacts.publish",
+      "params": {
+        "session": "orch-2",
+        "task": "${TASK}",
+        "node": "impl-01",
+        "name": "test_report",
+        "content": "# test report v1\n"
+      },
+      "capture": { "SHA_REPORT": "result.root_sha256" },
+      "expect": {
+        "result": {
+          "kind": "file",
+          "version": 1,
+          "size": 17,
+          "root_sha256": { "$regex": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
+    {
+      "name": "发布目录型工件(manifest 文件清单 + 每文件各自 hash)",
+      "call": "artifacts.publish",
+      "params": {
+        "session": "orch-2",
+        "task": "${TASK}",
+        "node": "impl-01",
+        "name": "bundle",
+        "files": [
+          { "path": "a.txt", "content": "A" },
+          { "path": "sub/b.txt", "content": "B" }
+        ]
+      },
+      "capture": { "SHA_BUNDLE": "result.root_sha256" },
+      "expect": { "result": { "kind": "tree", "version": 1 } }
+    },
+    {
+      "name": "resolve 回读指针(哈希须与发布一致)",
+      "call": "artifacts.resolve",
+      "params": { "session": "orch-2", "task": "${TASK}", "node": "impl-01", "name": "test_report" },
+      "expect": {
+        "result": {
+          "version": 1,
+          "rootSha256": "${SHA_REPORT}"
+        }
+      }
+    },
+    {
+      "name": "read 回读文件内容",
+      "call": "artifacts.read",
+      "params": { "session": "orch-2", "task": "${TASK}", "node": "impl-01", "name": "test_report" },
+      "expect": { "result": { "encoding": "utf8", "data": "# test report v1\n", "size": 17 } }
+    },
+    {
+      "name": "read 按 entry_path 回读目录工件内文件",
+      "call": "artifacts.read",
+      "params": {
+        "session": "orch-2",
+        "task": "${TASK}",
+        "node": "impl-01",
+        "name": "bundle",
+        "entry_path": "sub/b.txt"
+      },
+      "expect": { "result": { "encoding": "utf8", "data": "B" } }
+    }
+  ],
+  "events": {
+    "match": "subsequence",
+    "scope": { "tenant": "default", "task": "${TASK}" },
+    "expect": [
+      { "type": "node.started", "payload": { "nodeId": "${AGENT}" } },
+      { "type": "grant.granted", "payload": { "cap": "fs:workdir", "scope": "rw", "source": "baseline" } },
+      { "type": "node.completed", "payload": { "nodeId": "${AGENT}" } },
+      {
+        "type": "artifact.published",
+        "payload": { "node": "impl-01", "name": "test_report", "kind": "file", "size": 17, "sha256": "${SHA_REPORT}" }
+      },
+      {
+        "type": "artifact.published",
+        "payload": { "node": "impl-01", "name": "bundle", "kind": "tree", "sha256": "${SHA_BUNDLE}" }
+      }
+    ]
+  }
+}

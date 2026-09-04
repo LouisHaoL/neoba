@@ -1,0 +1,6 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "agent_id": "task-42/e2e-tester-01",
+  "status": "waiting_feedback"
+}

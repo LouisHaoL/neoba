@@ -1,0 +1,10 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "type": "msg.feedback",
+  "to": "task-42/impl-01",
+  "kind": "correction",
+  "ref": "artifact:test_report",
+  "body": "登录用例断言反了,重做",
+  "traversal": 2
+}

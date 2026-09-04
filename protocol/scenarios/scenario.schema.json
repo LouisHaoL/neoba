@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/scenario.schema.json",
+  "title": "P0 golden scenario(一致性测试集场景,§9 P0)",
+  "description": "给定编排输入(操作序列)+ 期望输出断言(JSON-RPC 结果 + 事件序列)。场景即接入合同:任何 harness 实现同样操作序列并得到同样断言结果,即视为协议一致。场景文件是纯 JSON 数据,执行器在 daemon/test/golden/(参考实现);setup.capabilities / setup.presets 复用协议已冻结的 capability-registry / preset schema,不另造结构。",
+  "type": "object",
+  "required": ["api", "scenario", "description", "protocol_refs", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "api": {
+      "const": "scenario/1.0",
+      "description": "文档类自版本标识(§3 总则根类型决议):scenario 走独立 semver 轴"
+    },
+    "scenario": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "description": "场景名,如 01-minimal-loop"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 8,
+      "description": "场景意图:测什么、断言什么(对 harness 作者即合同说明)"
+    },
+    "protocol_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "对应设计文档章节引用,如 \"§3.0 握手与版本协商\""
+    },
+    "setup": { "$ref": "#/$defs/setup" },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "description": "操作序列:JSON-RPC 调用 + 执行器特殊操作(restart / hardline.check),按序执行",
+      "items": { "$ref": "#/$defs/step" }
+    },
+    "events": { "$ref": "#/$defs/events" }
+  },
+  "$defs": {
+    "setup": {
+      "type": "object",
+      "description": "daemon 启动前置:自定义能力注册表 / 预设集;缺省用参考实现内置默认",
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "$ref": "https://neoba.dev/schemas/capability-registry.schema.json",
+          "description": "自定义能力注册表文档(整表替换内置默认)"
+        },
+        "presets": {
+          "type": "array",
+          "items": { "$ref": "https://neoba.dev/schemas/preset.schema.json" },
+          "description": "本场景可用的预设集(task.create 按 name 引用)"
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "oneOf": [
+        { "$ref": "#/$defs/rpcStep" },
+        { "$ref": "#/$defs/restartStep" },
+        { "$ref": "#/$defs/hardlineStep" }
+      ]
+    },
+    "rpcStep": {
+      "type": "object",
+      "required": ["call"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "步骤名(断言失败时的可读标识)" },
+        "call": { "type": "string", "minLength": 1, "description": "JSON-RPC 方法名,如 session.init / task.create" },
+        "params": { "type": "object", "description": "调用参数;字符串中的 ${VAR} 引用此前步骤 capture 的值" },
+        "auth": {
+          "enum": ["daemon", "none", "wrong"],
+          "description": "Bearer token 携带方式:daemon=正确 token(缺省)、none=缺失、wrong=错误(§6 鉴权断言用)"
+        },
+        "capture": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)*$",
+            "description": "从响应体取值的点分路径,如 result.task_id"
+          },
+          "description": "把响应体中的值捕获为变量,供后续步骤 params / 期望引用:${VAR}"
+        },
+        "expect": { "$ref": "#/$defs/rpcExpect" }
+      }
+    },
+    "rpcExpect": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "http": { "type": "integer", "minimum": 200, "maximum": 599, "description": "期望 HTTP 状态码,缺省 200" },
+        "error_code": { "type": "integer", "description": "期望 JSON-RPC error.code(如 -32001 鉴权、-32000 域错误)" },
+        "result": {
+          "description": "期望结果(部分匹配规范):对象按子集匹配、数组按位且等长;{\"$contains\": [...]} 表示无序包含;{\"$regex\": \"...\"} 表示正则匹配;字符串支持 ${VAR} 引用"
+        },
+        "error": { "description": "期望 error.data 的部分匹配规范(与 error_code 可并用)" }
+      }
+    },
+    "restartStep": {
+      "type": "object",
+      "required": ["op"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "restart" },
+        "name": { "type": "string" }
+      },
+      "description": "停掉 daemon 并用同一状态目录重启(§6 事件溯源恢复);token 随重启更换"
+    },
+    "hardlineStep": {
+      "type": "object",
+      "required": ["op", "cap", "scope", "expect"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "hardline.check" },
+        "name": { "type": "string" },
+        "cap": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/cap_id" },
+        "scope": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/scope" },
+        "expect": {
+          "type": "object",
+          "required": ["verdict", "auto_allowed"],
+          "additionalProperties": false,
+          "properties": {
+            "registered": { "type": "boolean", "description": "期望该 cap 已注册" },
+            "risk_level": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/risk_level" },
+            "verdict": { "enum": ["permitted", "forbidden", "unknown_risk"] },
+            "auto_allowed": { "type": "boolean", "description": "期望 hardlineAllowsAuto 判定(false = 任何自动放行路径必须拒绝)" }
+          }
+        }
+      },
+      "description": "协议层硬底线判定(§3.3):对给定 cap/scope 断言 forbidden 判定与自动放行拒绝"
+    },
+    "events": {
+      "type": "object",
+      "required": ["expect"],
+      "additionalProperties": false,
+      "properties": {
+        "match": {
+          "enum": ["subsequence", "exact"],
+          "description": "subsequence(缺省):期望序列按序出现在实际事件流中,允许其间夹实现无关事件;exact:逐条按位且等长"
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tenant": { "type": "string" },
+            "session": { "type": ["string", "null"] },
+            "task": { "type": ["string", "null"] },
+            "agent": { "type": ["string", "null"] },
+            "types": { "type": "array", "items": { "type": "string" } }
+          },
+          "description": "事件过滤(principal 四层精确匹配 + 可选类型过滤),出现的字段必须精确相等;值支持 ${VAR}"
+        },
+        "expect": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/eventExpect" },
+          "description": "期望事件序列"
+        }
+      }
+    },
+    "eventExpect": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "minLength": 1, "description": "事件类型(闭集,§events/types)" },
+        "payload": { "type": "object", "description": "payload 部分匹配规范(子集匹配,支持 $regex / ${VAR})" },
+        "principal": { "type": "object", "description": "principal 部分匹配规范(子集匹配)" }
+      }
+    }
+  }
+}

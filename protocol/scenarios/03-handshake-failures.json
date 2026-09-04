@@ -1,0 +1,85 @@
+{
+  "api": "scenario/1.0",
+  "scenario": "03-handshake-failures",
+  "description": "握手失败集:协议版本不相邻拒绝、重复会话、Bearer token 缺失/错误。协议级错误断言 = HTTP 状态 + JSON-RPC error.code + error.data 子集;且失败握手不落任何业务事件(事件流只有 daemon 自身生命周期)。",
+  "protocol_refs": [
+    "§3.0 握手与版本协商(semver:仅支持相邻两个 major)",
+    "§3.0 版本兼容策略",
+    "§6 鉴权(v1:Bearer token 强制校验)"
+  ],
+  "steps": [
+    {
+      "name": "正常握手(为重复会话铺垫)",
+      "call": "session.init",
+      "params": {
+        "protocol": "1.0",
+        "role": "orchestrator",
+        "principal": { "tenant": "default", "session": "orch-3" },
+        "harness": "golden-harness",
+        "capabilities": { "broadcast": true }
+      },
+      "expect": { "result": { "session": { "tenant": "default", "session": "orch-3" } } }
+    },
+    {
+      "name": "重复会话:同 tenant/session 再次握手 → SESSION_DUPLICATE",
+      "call": "session.init",
+      "params": {
+        "protocol": "1.0",
+        "role": "orchestrator",
+        "principal": { "tenant": "default", "session": "orch-3" },
+        "harness": "golden-harness",
+        "capabilities": { "broadcast": true }
+      },
+      "expect": {
+        "http": 409,
+        "error_code": -32000,
+        "error": { "code": "SESSION_DUPLICATE", "tenant": "default", "session": "orch-3" }
+      }
+    },
+    {
+      "name": "版本不相邻:protocol 2.0 → 拒绝握手(§3.0 仅支持相邻两个 major)",
+      "call": "session.init",
+      "params": {
+        "protocol": "2.0",
+        "role": "orchestrator",
+        "principal": { "tenant": "default", "session": "orch-ver" },
+        "harness": "golden-harness",
+        "capabilities": { "broadcast": true }
+      },
+      "expect": {
+        "http": 400,
+        "error_code": -32000,
+        "error": { "code": "SESSION_INIT_INVALID", "field": "protocol" }
+      }
+    },
+    {
+      "name": "token 缺失 → 401 missing_token",
+      "call": "capabilities.list",
+      "params": {},
+      "auth": "none",
+      "expect": {
+        "http": 401,
+        "error_code": -32001,
+        "error": { "code": "UNAUTHORIZED", "reason": "missing_token" }
+      }
+    },
+    {
+      "name": "token 错误 → 401 invalid_token",
+      "call": "capabilities.list",
+      "params": {},
+      "auth": "wrong",
+      "expect": {
+        "http": 401,
+        "error_code": -32001,
+        "error": { "code": "UNAUTHORIZED", "reason": "invalid_token" }
+      }
+    }
+  ],
+  "events": {
+    "match": "exact",
+    "scope": { "tenant": "default", "task": null },
+    "expect": [
+      { "type": "daemon.started" }
+    ]
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "api": "scenario/1.0",
+  "scenario": "01-minimal-loop",
+  "description": "最小闭环:握手 → 查能力注册表 → 按 e2e-tester 预设建任务 → 查 grant manifest。断言 baseline 授予(fs:workdir rw + mcp:playwright write)与事件序列 daemon.started → grant.granted ×2;node.started/node.completed 属实现无关编排噪声,由子序列匹配容忍。",
+  "protocol_refs": [
+    "§3.0 握手与版本协商",
+    "§3.1 能力注册表",
+    "§3.2 Agent 预设(Preset)",
+    "§3.3 授予清单与基线授予",
+    "§6 事件溯源(审计 = 事件日志同一份)"
+  ],
+  "setup": {
+    "presets": [
+      {
+        "api": "preset/1.0",
+        "name": "e2e-tester",
+        "description": "端到端测试执行者:跑 Playwright 用例并输出报告",
+        "base": "any",
+        "model": { "tier": "standard", "fallback": ["standard", "fast"] },
+        "skills": ["playwright-basics"],
+        "baseline_grants": [
+          { "cap": "fs:workdir", "scope": "rw" },
+          { "cap": "mcp:playwright", "scope": "write" }
+        ],
+        "io_contracts": {
+          "inputs": [{ "name": "test_plan", "type": "file:markdown" }],
+          "outputs": [
+            { "name": "test_report", "type": "file:markdown" },
+            { "name": "artifacts", "type": "dir" }
+          ]
+        },
+        "escalation_policy": { "auto_approve": [], "require_approval": ["*"] }
+      }
+    ]
+  },
+  "steps": [
+    {
+      "name": "握手(§3.0)",
+      "call": "session.init",
+      "params": {
+        "protocol": "1.0",
+        "role": "orchestrator",
+        "principal": { "tenant": "default", "session": "orch-1" },
+        "harness": "golden-harness",
+        "capabilities": { "broadcast": true }
+      },
+      "expect": {
+        "result": {
+          "response": {
+            "protocol": "1.0",
+            "spec_version": "1.0",
+            "daemon_version": { "$regex": "^\\d+\\.\\d+\\.\\d+$" }
+          },
+          "session": {
+            "tenant": "default",
+            "session": "orch-1",
+            "role": "orchestrator",
+            "capabilities": { "broadcast": true, "async_events": false, "interactive_approval": false }
+          }
+        }
+      }
+    },
+    {
+      "name": "查能力注册表(§3.1)",
+      "call": "capabilities.list",
+      "params": {},
+      "expect": {
+        "result": {
+          "capabilities": {
+            "$contains": [
+              { "id": "fs:workdir", "kind": "fs_path", "risk_level": "low", "grantable_scopes": ["ro", "rw"] },
+              { "id": "mcp:playwright", "kind": "mcp_server", "risk_level": "medium", "grantable_scopes": ["read", "write"] },
+              { "id": "mcp:github", "kind": "mcp_server", "risk_level": "medium", "grantable_scopes": ["read", "write", "admin"] }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "按 e2e-tester 预设建任务(§3.3 基线授予)",
+      "call": "task.create",
+      "params": {
+        "intent": "为订单模块跑一轮 e2e 回归",
+        "preset": "e2e-tester",
+        "session": "orch-1"
+      },
+      "capture": { "TASK": "result.task_id", "AGENT": "result.agent_id" },
+      "expect": {
+        "result": {
+          "task_id": { "$regex": "^task-[0-9a-z]+-[0-9a-z]+$" },
+          "agent_id": "${TASK}/worker-01",
+          "status": "completed",
+          "manifest": {
+            "agent_id": "${AGENT}",
+            "grants": [
+              { "cap": "fs:workdir", "scope": "rw", "source": "baseline", "ttl": null },
+              { "cap": "mcp:playwright", "scope": "write", "source": "baseline", "ttl": null }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "查 grant manifest(§3.3)",
+      "call": "grants.of",
+      "params": { "agent_id": "${AGENT}" },
+      "expect": {
+        "result": {
+          "manifest": {
+            "agent_id": "${AGENT}",
+            "grants": [
+              { "cap": "fs:workdir", "scope": "rw", "source": "baseline" },
+              { "cap": "mcp:playwright", "scope": "write", "source": "baseline" }
+            ],
+            "audit": {
+              "$contains": [
+                { "event": "granted", "cap": "fs:workdir", "decision_source": "auto_rule:baseline" },
+                { "event": "granted", "cap": "mcp:playwright", "decision_source": "auto_rule:baseline" }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "events": {
+    "match": "subsequence",
+    "expect": [
+      { "type": "daemon.started", "principal": { "task": null } },
+      {
+        "type": "grant.granted",
+        "principal": { "task": "${TASK}", "agent": "${AGENT}" },
+        "payload": { "cap": "fs:workdir", "scope": "rw", "source": "baseline", "decisionSource": "auto_rule:baseline" }
+      },
+      {
+        "type": "grant.granted",
+        "payload": { "cap": "mcp:playwright", "scope": "write", "source": "baseline" }
+      }
+    ]
+  }
+}

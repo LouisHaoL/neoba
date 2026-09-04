@@ -1,0 +1,9 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "event": "usage",
+  "ts": "2026-09-04T16:05:41Z",
+  "tokens_in": 1284,
+  "tokens_out": 310,
+  "cost_estimate": 0.0021
+}

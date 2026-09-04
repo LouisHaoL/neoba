@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/preset.schema.json",
+  "title": "3.2 Agent 预设(Preset)",
+  "description": "声明式描述一个可实例化的 Agent,是系统的\"设计产物\"单元。预设与运行时环境分离(借鉴 homerail 的 workflow / runtime-profile 分离);model.tier 是抽象档位,具体模型名由 Model Score Registry(§3.9)动态解析。根类型:文档类(§3 总则决议)——首层只用 api,禁止 protocol/spec_version,版本按 kind 独立 semver 演进。",
+  "type": "object",
+  "required": ["api", "name", "description", "base", "skills", "baseline_grants", "io_contracts", "escalation_policy"],
+  "properties": {
+    "api": {
+      "const": "preset/1.0",
+      "description": "文档类自版本标识,格式 <kind>/<major.minor>(§3 总则根类型决议);semver 兼容规则作用于本轴"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._/-]*$",
+      "description": "预设名,如 e2e-tester、planner/tech-split"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "description": "职责描述,如 \"端到端测试执行者:跑 Playwright 用例并输出报告\""
+    },
+    "base": {
+      "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/base",
+      "description": "基座偏好:any | claude-code | codex | opencode"
+    },
+    "model": {
+      "type": "object",
+      "description": "可选模型预设(基座无关的抽象档位)",
+      "required": ["tier"],
+      "properties": {
+        "tier": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/tier" },
+        "fallback": {
+          "type": "array",
+          "items": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/tier" },
+          "description": "档位降级序列,如 [standard, fast]"
+        }
+      },
+      "additionalProperties": false
+    },
+    "skills": {
+      "type": "array",
+      "description": "预设挂载的技能清单,如 [playwright-basics]",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "idempotent": {
+      "type": "boolean",
+      "default": false,
+      "description": "幂等性声明(§3.5 v0.2 失败语义):节点未声明 idempotent: true 时,执行引擎不得对 timeout 失败自动重试(副作用型操作默认不重试);crash 重试不受此限"
+    },
+    "baseline_grants": {
+      "type": "array",
+      "description": "基线授予:实例化时置入 grant manifest 的最小能力集(§3.3;最小化不变量:基线 = 完成典型任务的最小集)",
+      "items": { "$ref": "#/$defs/baselineGrant" }
+    },
+    "io_contracts": {
+      "type": "object",
+      "description": "与编排契约对应(§3.5):输入/输出工件的名称与类型",
+      "required": ["inputs", "outputs"],
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ioPort" }
+        },
+        "outputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ioPort" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "escalation_policy": {
+      "type": "object",
+      "description": "升级申请默认策略,分层合并:内置默认 < 全局配置 < preset.escalation_policy < orchestrator session 覆盖(§3.3 v0.2);协议层硬底线(risk_level=high 且 scope ∈ {write,admin})禁止自动放行,不可被任何层级覆盖",
+      "required": ["auto_approve", "require_approval"],
+      "properties": {
+        "auto_approve": {
+          "type": "array",
+          "description": "自动放行清单:命中即自动授予。匹配语义(§3 总则通用 Schema 约定):精确 cap id;\"*\" 仅整串通配(即示例中\"其余全部\");前缀通配显式语法 \"mcp:*\";不允许实现自定义模糊匹配。命中 auto_rule 自动放行同样全量入审计(decision_source)",
+          "items": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/cap_id_or_wildcard" }
+        },
+        "require_approval": {
+          "type": "array",
+          "description": "需逐条审批清单;匹配语义同 auto_approve(\"*\" = 其余全部需审批,§3.2 示例)",
+          "items": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/cap_id_or_wildcard" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "not": {
+    "anyOf": [
+      { "required": ["protocol"] },
+      { "required": ["spec_version"] }
+    ]
+  },
+  "$defs": {
+    "baselineGrant": {
+      "type": "object",
+      "description": "基线授予条目,如 { cap: fs:workdir, scope: rw }",
+      "required": ["cap", "scope"],
+      "properties": {
+        "cap": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/cap_id" },
+        "scope": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/scope" }
+      },
+      "additionalProperties": false
+    },
+    "ioPort": {
+      "type": "object",
+      "description": "io_contract 端口,如 { name: test_plan, type: file:markdown }",
+      "required": ["name", "type"],
+      "properties": {
+        "name": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/artifact_name" },
+        "type": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/io_type" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

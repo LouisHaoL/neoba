@@ -1,0 +1,9 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "event": "tool_call",
+  "ts": "2026-09-04T16:02:11Z",
+  "agent": "task-42/e2e-tester-01",
+  "tool": "screenshot",
+  "args_digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+}

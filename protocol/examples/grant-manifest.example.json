@@ -1,0 +1,37 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "agent_id": "task-42/e2e-tester-01",
+  "grants": [
+    {
+      "cap": "fs:workdir",
+      "scope": "rw",
+      "source": "baseline",
+      "ttl": null
+    },
+    {
+      "cap": "mcp:github",
+      "scope": "read",
+      "source": "baseline",
+      "ttl": null,
+      "constraint": { "secret_ids": ["github-token"] }
+    },
+    {
+      "cap": "mcp:mcp-server-browser",
+      "scope": "write",
+      "source": "escalation:req-7",
+      "ttl": "2026-09-04T18:00:00Z",
+      "constraint": { "fs_scope_narrowed_to": "${task.workdir}/screenshots" }
+    }
+  ],
+  "audit": [
+    {
+      "event": "granted",
+      "cap": "mcp:mcp-server-browser",
+      "by": "orchestrator",
+      "decision_source": "auto_rule:default-low",
+      "at": "2026-09-04T16:00:00Z",
+      "req_id": "req-7"
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/artifact-manifest.schema.json",
+  "title": "3.7 交付契约与工件仓库(artifact manifest,CAS)",
+  "description": "工件仓库 = 内容寻址存储 CAS(v0.2 定版,§10.2),参考 git/OCI:objects/aa/bb/<sha256> 为不可变内容块(天然跨任务去重);manifests/{tenant}/{task}/{node}/{artifact} 为清单指针。发布 = 写屏障:worker 写临时目录 → daemon ingest 进 CAS → 原子更新 manifest 指针,屏障之前对所有读者不可见;发布后多读者并发共享读(不可变,无锁),同一路径写写严格串行。worker 崩溃的半写状态留在 .staging/,永不进入 CAS。目录型工件 = manifest 文件清单 + 每文件各自 hash。manifest 按文档类自版本化(api: artifact-manifest/1.0,§3.7/§3 总则)——工件要活得比 daemon 版本久,结构变更走独立版本轴,旧工件库永远可读。本 schema 冻结的是落在 manifests/ 路径下的清单文档结构。",
+  "type": "object",
+  "required": ["api", "tenant", "task", "node", "name", "kind", "sha256", "ingested_at"],
+  "properties": {
+    "api": {
+      "const": "artifact-manifest/1.0",
+      "description": "文档类自版本标识,格式 <kind>/<major.minor>(§3 总则根类型决议;§3.7:工件要活得比 daemon 版本久,结构变更走独立版本轴)。注意与 revision 是两条独立的版本概念:api 轴 = 清单结构 schema 版本;revision = 同路径内容发布计数"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "同路径发布计数(非 schema 版本):同一路径写写严格串行,每次原子更新 manifest 指针 +1;与 api 版本轴(文档类 semver)互不相干"
+    },
+    "tenant": {
+      "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/tenant_id",
+      "description": "清单路径第一段:manifests/{tenant}/…(单人部署恒 \"default\")"
+    },
+    "task": {
+      "type": "string",
+      "minLength": 1,
+      "description": "清单路径第二段:任务 ID,如 task-42"
+    },
+    "node": {
+      "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/node_id",
+      "description": "清单路径第三段:产出节点,对应 {workdir}/artifacts/{node_id}/{name} 的 node_id"
+    },
+    "name": {
+      "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/artifact_name",
+      "description": "清单路径第四段:工件名"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["file", "dir"],
+      "description": "文件型工件 = 单内容块;目录型工件 = 文件清单 + 每文件各自 hash(去重与完整性校验同时获得)"
+    },
+    "sha256": {
+      "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/sha256",
+      "description": "file:内容块哈希(objects/aa/bb/<sha256>);dir:清单自身的哈希。与 artifact_ready 事件、编排 evidence 双重校验(哈希不匹配 = 未完成)"
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "file:内容块字节数;dir:全部文件字节总数(信息性)"
+    },
+    "entries": {
+      "type": "array",
+      "description": "目录型工件的文件清单(仅 kind=dir,由 if/then 强制);path 相对工件根",
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "相对路径,如 screenshots/login.png"
+          },
+          "sha256": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/sha256" },
+          "size": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "retention": {
+      "type": "object",
+      "description": "GC 字段位(§3.7 v0.2 预留):工件节点保留策略。P1 仅提供 neoba prune 手动清理,自动 GC 为 P2+ 工作项;字段集待定,现开放为对象(见 README 模糊点)",
+      "additionalProperties": true
+    },
+    "ingested_at": {
+      "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/timestamp",
+      "description": "ingest 进 CAS 并原子更新指针的时间 = 写屏障完成时刻"
+    }
+  },
+  "additionalProperties": false,
+  "if": {
+    "properties": { "kind": { "const": "dir" } },
+    "required": ["kind"]
+  },
+  "then": {
+    "required": ["entries"],
+    "properties": { "entries": { "minItems": 1 } }
+  },
+  "not": {
+    "anyOf": [
+      { "required": ["protocol"] },
+      { "required": ["spec_version"] }
+    ]
+  }
+}

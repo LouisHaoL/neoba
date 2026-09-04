@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/workflow.schema.json",
+  "title": "3.5(b)(c) 编排产物(WorkflowSpec)与静态校验对象",
+  "description": "Planner 的输出语言(借鉴 homerail WorkflowSpec v1):节点 = 预设 + 契约式边绑定(inputs 绑定 from 节点.工件);feedback 为有界反馈回路(超限升级给主控);evidence 防编造(必须存在 + sha256 记录,与 artifact_ready 事件双重校验)。schema 校验、契约类型匹配、依赖成环检测、禁授能力检查、模型准入检查、验收项可追溯由 PlanCheck(确定性代码)执行。根类型:文档类(§3 总则决议)——首层只用 api,禁止 protocol/spec_version,版本按 kind 独立 semver 演进。",
+  "type": "object",
+  "required": ["api", "intent_ref", "nodes", "outputs", "feedback", "evidence"],
+  "properties": {
+    "api": {
+      "const": "workflow/1.0",
+      "description": "文档类自版本标识,格式 <kind>/<major.minor>(§3 总则根类型决议);semver 兼容规则作用于本轴"
+    },
+    "intent_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "关联的编排需求单 ID,如 intent-001"
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "description": "编排节点列表;每个节点实例化一个 Agent 预设",
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "outputs": {
+      "type": "array",
+      "description": "整个编排对外交付的工件(自节点输出绑定而来)",
+      "items": { "$ref": "#/$defs/outputDecl" }
+    },
+    "feedback": {
+      "type": "array",
+      "description": "有界反馈回路:test 失败可打回 impl;超过 max_traversals 升级给主控(执行引擎计数,§3.5e)",
+      "items": { "$ref": "#/$defs/feedbackEdge" }
+    },
+    "evidence": {
+      "type": "array",
+      "description": "防编造证据声明(借鉴 required_workspace_files + sha256):子 Agent 声称完成但哈希不匹配 = 未完成(§3.7)",
+      "items": { "$ref": "#/$defs/evidenceDecl" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "node": {
+      "type": "object",
+      "description": "编排节点,如 { id: impl, preset: coder/backend, inputs: [{ from: plan.outputs.split_plan }] }",
+      "required": ["id", "preset"],
+      "properties": {
+        "id": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/node_id" },
+        "preset": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*$",
+          "description": "要实例化的预设名,如 planner/tech-split、e2e-tester"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "节点级超时,秒(§3.5b v0.2),如 3600"
+        },
+        "retry": {
+          "type": "object",
+          "description": "重试策略(§3.5b v0.2 失败语义默认从简:crash/timeout → 节点 fail → 按 retry 重试或升级主控)。组合校验留给 PlanCheck:副作用型操作(节点输出已发布)默认不自动重试——节点未在预设中声明 idempotent: true 时,on 只允许 [crash],timeout 不可重试;schema 不表达此约束",
+          "required": ["max", "on"],
+          "properties": {
+            "max": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "最大重试次数"
+            },
+            "on": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": ["crash", "timeout"],
+                "description": "触发重试的失败类型:crash(基座/进程崩溃)可重试;timeout 默认不重试,除非预设声明幂等"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "inputs": {
+          "type": "array",
+          "description": "契约式边绑定:输入来自上游节点的工件(节点间交互只通过交付文件,§3.7)",
+          "items": { "$ref": "#/$defs/inputBinding" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "inputBinding": {
+      "type": "object",
+      "required": ["from"],
+      "properties": {
+        "from": {
+          "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/output_binding",
+          "description": "上游绑定,如 plan.outputs.split_plan"
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputDecl": {
+      "type": "object",
+      "description": "编排级输出,如 { from: test.outputs.test_report, required: true }",
+      "required": ["from"],
+      "properties": {
+        "from": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/output_binding" },
+        "required": {
+          "type": "boolean",
+          "default": false,
+          "description": "是否为验收必需工件"
+        }
+      },
+      "additionalProperties": false
+    },
+    "feedbackEdge": {
+      "type": "object",
+      "description": "反馈回路边,如 { from: test, to: impl, max_traversals: 2 }(文档 YAML 单行写法已按结构化语义冻结,见 README 模糊点 4)",
+      "required": ["from", "to", "max_traversals"],
+      "properties": {
+        "from": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/node_id" },
+        "to": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/node_id" },
+        "max_traversals": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "有界反馈上限:超限升级给主控;msg.feedback.traversal 与此对应"
+        }
+      },
+      "additionalProperties": false
+    },
+    "evidenceDecl": {
+      "type": "object",
+      "description": "证据声明,如 { node: test, artifact: test_report, must_exist: true, sha256_recorded: true }",
+      "required": ["node", "artifact", "must_exist", "sha256_recorded"],
+      "properties": {
+        "node": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/node_id" },
+        "artifact": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/artifact_name" },
+        "must_exist": {
+          "type": "boolean",
+          "description": "工件必须存在(工件按 {workdir}/artifacts/{node_id}/{name} 存放,§3.7)"
+        },
+        "sha256_recorded": {
+          "type": "boolean",
+          "description": "落盘即记 sha256,并与 artifact_ready 事件双重校验"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "not": {
+    "anyOf": [
+      { "required": ["protocol"] },
+      { "required": ["spec_version"] }
+    ]
+  }
+}

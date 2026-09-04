@@ -1,0 +1,93 @@
+{
+  "api": "scenario/1.0",
+  "scenario": "05-hardline-baseline",
+  "description": "协议层硬底线(§10.3 决议):构造把 high-risk + write 能力写进 baseline 授予的预设(改预设)。预设本身是合法可构造的设计产物(P1 baseline 走人工把关路径,不走 auto_rule 放行),但硬底线判定 forbidden:该授予禁止进入任何自动放行路径,不可被任何配置层级覆盖——任何实现必须在此拒绝。对照:同能力 read 不触硬底线。",
+  "protocol_refs": [
+    "§3.3 能力审批流:协议层硬底线(high-risk write/admin 禁止自动放行)",
+    "§3.3 decision_source 审计(自动放行同样全量入账)",
+    "§10.4 决议 3(硬底线不进配置)"
+  ],
+  "setup": {
+    "capabilities": {
+      "protocol": "1.0",
+      "spec_version": "1.0",
+      "capabilities": [
+        {
+          "id": "fs:workdir",
+          "kind": "fs_path",
+          "description": "任务工作目录",
+          "risk_level": "low",
+          "grantable_scopes": ["ro", "rw"],
+          "path_template": "${task.workdir}"
+        },
+        {
+          "id": "mcp:prod-db",
+          "kind": "mcp_server",
+          "description": "生产数据库写操作:迁移与行级修改",
+          "tools": ["run_migration", "update_row"],
+          "risk_level": "high",
+          "grantable_scopes": ["read", "write", "admin"]
+        }
+      ]
+    },
+    "presets": [
+      {
+        "api": "preset/1.0",
+        "name": "prod-writer",
+        "description": "危险预设:baseline 授予 high-risk write,且 escalation_policy 试图自动放行同能力",
+        "base": "any",
+        "skills": [],
+        "baseline_grants": [{ "cap": "mcp:prod-db", "scope": "write" }],
+        "io_contracts": { "inputs": [], "outputs": [] },
+        "escalation_policy": { "auto_approve": ["mcp:prod-db"], "require_approval": [] }
+      }
+    ]
+  },
+  "steps": [
+    {
+      "name": "能力已注册且确为 high-risk;write 触硬底线:判定 forbidden,自动放行必须拒绝",
+      "op": "hardline.check",
+      "cap": "mcp:prod-db",
+      "scope": "write",
+      "expect": {
+        "registered": true,
+        "risk_level": "high",
+        "verdict": "forbidden",
+        "auto_allowed": false
+      }
+    },
+    {
+      "name": "对照:同能力 read 不触硬底线(硬底线只绑定 write/admin)",
+      "op": "hardline.check",
+      "cap": "mcp:prod-db",
+      "scope": "read",
+      "expect": {
+        "registered": true,
+        "risk_level": "high",
+        "verdict": "permitted",
+        "auto_allowed": true
+      }
+    },
+    {
+      "name": "high-risk 能力在注册表可见(risk_level 是审批决策依据,§3.1)",
+      "call": "capabilities.list",
+      "params": {},
+      "expect": {
+        "result": {
+          "capabilities": {
+            "$contains": [
+              { "id": "mcp:prod-db", "risk_level": "high", "grantable_scopes": ["read", "write", "admin"] }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "events": {
+    "match": "exact",
+    "scope": { "tenant": "default", "task": null },
+    "expect": [
+      { "type": "daemon.started" }
+    ]
+  }
+}

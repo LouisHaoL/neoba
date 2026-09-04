@@ -1,0 +1,101 @@
+{
+  "api": "scenario/1.0",
+  "scenario": "04-recovery",
+  "description": "恢复:建两个任务 → 重启 daemon(同一状态目录)→ task.status/task.list/grants.of 从事件重放一致恢复;daemon 级事件出现 daemon.recovered 且 in-flight 计数为 0。§6:内存态 = 重放,升级/重启不得丢运行状态。",
+  "protocol_refs": [
+    "§6 状态与恢复(事件溯源:恢复 = 重放事件)",
+    "§3.3 审计日志 = 事件日志,同一份"
+  ],
+  "steps": [
+    {
+      "name": "任务甲",
+      "call": "task.create",
+      "params": { "intent": "任务甲:梳理回归清单", "preset": "minimal" },
+      "capture": { "TASK_A": "result.task_id", "AGENT_A": "result.agent_id" },
+      "expect": { "result": { "status": "completed" } }
+    },
+    {
+      "name": "任务乙",
+      "call": "task.create",
+      "params": { "intent": "任务乙:执行回归", "preset": "minimal" },
+      "capture": { "TASK_B": "result.task_id", "AGENT_B": "result.agent_id" },
+      "expect": { "result": { "status": "completed" } }
+    },
+    {
+      "op": "restart",
+      "name": "重启 daemon(同一状态目录;token 随重启更换)"
+    },
+    {
+      "name": "重启后查任务甲(状态经事件重放恢复)",
+      "call": "task.status",
+      "params": { "task_id": "${TASK_A}" },
+      "expect": {
+        "result": {
+          "task": {
+            "taskId": "${TASK_A}",
+            "agentId": "${AGENT_A}",
+            "intent": "任务甲:梳理回归清单",
+            "preset": "minimal",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "name": "重启后查任务乙",
+      "call": "task.status",
+      "params": { "task_id": "${TASK_B}" },
+      "expect": {
+        "result": {
+          "task": {
+            "taskId": "${TASK_B}",
+            "intent": "任务乙:执行回归",
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "name": "重启后 task.list 含两个已恢复任务",
+      "call": "task.list",
+      "params": {},
+      "expect": {
+        "result": {
+          "tasks": {
+            "$contains": [
+              { "taskId": "${TASK_A}", "status": "completed", "preset": "minimal" },
+              { "taskId": "${TASK_B}", "status": "completed", "preset": "minimal" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "重启后 grants.of(manifest 由 grant.granted 重放重建,审计字段一致)",
+      "call": "grants.of",
+      "params": { "agent_id": "${AGENT_A}" },
+      "expect": {
+        "result": {
+          "manifest": {
+            "agent_id": "${AGENT_A}",
+            "grants": [{ "cap": "fs:workdir", "scope": "rw", "source": "baseline", "ttl": null }],
+            "audit": {
+              "$contains": [
+                { "event": "granted", "cap": "fs:workdir", "decision_source": "auto_rule:baseline" }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "events": {
+    "match": "subsequence",
+    "scope": { "tenant": "default", "task": null },
+    "expect": [
+      { "type": "daemon.started" },
+      { "type": "daemon.started" },
+      { "type": "daemon.recovered", "payload": { "inFlight": 0 } }
+    ]
+  }
+}

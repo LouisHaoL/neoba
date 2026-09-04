@@ -1,0 +1,3 @@
+# 仓库内文本统一 LF(跨平台协作 + Node 工具链零 CRLF 干扰)
+* text=auto eol=lf
+*.png binary

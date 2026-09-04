@@ -1,0 +1,36 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "model": "glm-4.7-air",
+  "tier_fit": { "fast": 0.91, "standard": 0.62, "heavy": 0.30 },
+  "score": {
+    "prior": { "fast": 0.88, "standard": 0.55, "heavy": 0.20 },
+    "observed": { "fast": 0.86, "standard": 0.61, "heavy": null },
+    "samples": { "fast": 31, "standard": 16, "heavy": 0 },
+    "dimensions": {
+      "quality": 0.80,
+      "success_rate": 0.85,
+      "cost_efficiency": 0.74
+    }
+  },
+  "sample_records": [
+    {
+      "ts": "2026-09-04T15:30:00Z",
+      "tier": "fast",
+      "task_type": "bugfix",
+      "budget_tier": "low",
+      "traversals": 0,
+      "success": true,
+      "quality": 0.82
+    },
+    {
+      "ts": "2026-09-04T16:40:00Z",
+      "tier": "standard",
+      "task_type": "feature",
+      "budget_tier": "medium",
+      "traversals": 2,
+      "success": true
+    }
+  ],
+  "updated_at": "2026-09-04T17:00:00Z"
+}

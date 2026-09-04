@@ -1,0 +1,10 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "type": "msg.direct",
+  "to": "task-42/impl-01",
+  "body": {
+    "instruction": "优先修复登录模块的优惠券字段迁移"
+  },
+  "priority": "normal"
+}

@@ -1,0 +1,7 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "event": "message_delta",
+  "ts": "2026-09-04T16:02:12Z",
+  "text": "正在执行登录流程用例……"
+}

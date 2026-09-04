@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/model-score-registry.schema.json",
+  "title": "3.9 模型评分注册表(Model Score Registry,v0.2)",
+  "description": "解析 model.tier 抽象档位到具体模型的决策组件(§10.5:不做静态映射表;准入 allowed_models 是安全面一票否决,评分只是排序)。核心是评分随实测持续收敛:冷启动用公开基准给 prior;每次任务结束验收方反馈质量分;observed 按 tier 分桶(各桶独立 EMA,α≈0.15),samples 按桶计数,不足回退 prior 同档值。选型按 tier_fit × observed[tier] 决策。本分数定位为\"本系统内的实测表现\",不是通用能力榜。",
+  "type": "object",
+  "required": ["protocol", "spec_version", "model", "tier_fit", "score", "updated_at"],
+  "properties": {
+    "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+    "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "description": "具体模型名,如 glm-4.7-air"
+    },
+    "tier_fit": {
+      "type": "object",
+      "description": "各抽象档位的适配度(0~1)",
+      "required": ["fast", "standard", "heavy"],
+      "properties": {
+        "fast": { "$ref": "#/$defs/unitScore" },
+        "standard": { "$ref": "#/$defs/unitScore" },
+        "heavy": { "$ref": "#/$defs/unitScore" }
+      },
+      "additionalProperties": false
+    },
+    "score": {
+      "type": "object",
+      "description": "评分:prior / observed / samples 均按 tier 分桶(v0.2 重构)",
+      "required": ["prior", "observed", "samples", "dimensions"],
+      "properties": {
+        "prior": {
+          "type": "object",
+          "description": "初始分(分桶):公开基准/能力边界测试的冷启动评分;observed 桶样本不足时回退 prior 同档值",
+          "required": ["fast", "standard", "heavy"],
+          "properties": {
+            "fast": { "$ref": "#/$defs/unitScore" },
+            "standard": { "$ref": "#/$defs/unitScore" },
+            "heavy": { "$ref": "#/$defs/unitScore" }
+          },
+          "additionalProperties": false
+        },
+        "observed": {
+          "type": "object",
+          "description": "实测综合分(分桶):随任务反馈按桶独立 EMA 滚动更新;null = 该桶尚无实测样本",
+          "required": ["fast", "standard", "heavy"],
+          "properties": {
+            "fast": { "$ref": "#/$defs/maybeScore" },
+            "standard": { "$ref": "#/$defs/maybeScore" },
+            "heavy": { "$ref": "#/$defs/maybeScore" }
+          },
+          "additionalProperties": false
+        },
+        "samples": {
+          "type": "object",
+          "description": "实测样本数(按桶计数)",
+          "required": ["fast", "standard", "heavy"],
+          "properties": {
+            "fast": { "type": "integer", "minimum": 0 },
+            "standard": { "type": "integer", "minimum": 0 },
+            "heavy": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "dimensions": {
+          "type": "object",
+          "description": "分维度评分(全模型聚合,不按桶);质量分为可选项,缺省时仅以 success_rate 收敛、权重降低,防单次噪声振荡(§3.9 v0.2 评分诚实性约定)",
+          "required": ["quality", "success_rate", "cost_efficiency"],
+          "properties": {
+            "quality": {
+              "$ref": "#/$defs/unitScore",
+              "description": "主控/验收方给出的质量分"
+            },
+            "success_rate": {
+              "$ref": "#/$defs/unitScore",
+              "description": "任务完成率"
+            },
+            "cost_efficiency": {
+              "$ref": "#/$defs/unitScore",
+              "description": "token 成效比"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "sample_records": {
+      "type": "array",
+      "description": "可选的样本记录(评分诚实性约定,v0.2):每条实测样本附任务元数据——task_type、budget 档、traversal 次数作为难度代理;选型偏差(简单任务倾向便宜模型 → success_rate 虚高)短期只记录不校准,数据足够后归一",
+      "items": { "$ref": "#/$defs/sampleRecord" }
+    },
+    "updated_at": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/timestamp" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "unitScore": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "0~1 的评分值"
+    },
+    "maybeScore": {
+      "anyOf": [
+        { "$ref": "#/$defs/unitScore" },
+        { "type": "null" }
+      ],
+      "description": "0~1 评分,或 null(该 tier 桶尚无实测样本)"
+    },
+    "sampleRecord": {
+      "type": "object",
+      "description": "单条实测样本的任务元数据(字段名为按中文描述的最小冻结,见 README 模糊点)",
+      "required": ["ts", "tier", "task_type", "budget_tier", "traversals"],
+      "properties": {
+        "ts": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/timestamp" },
+        "tier": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/tier" },
+        "task_type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "任务类型标签(难度代理之一)"
+        },
+        "budget_tier": {
+          "type": "string",
+          "minLength": 1,
+          "description": "budget 档位标签(难度代理之二)"
+        },
+        "traversals": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "该任务的反馈回打次数(难度代理之三)"
+        },
+        "success": {
+          "type": "boolean",
+          "description": "任务是否完成"
+        },
+        "quality": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "可选质量分;缺省时该样本仅以 success_rate 收敛"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

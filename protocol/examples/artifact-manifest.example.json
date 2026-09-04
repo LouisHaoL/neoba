@@ -1,0 +1,24 @@
+{
+  "api": "artifact-manifest/1.0",
+  "revision": 1,
+  "tenant": "default",
+  "task": "task-42",
+  "node": "test",
+  "name": "test_report",
+  "kind": "dir",
+  "sha256": "cdb4ee2aed6936b0f8a2e5c1f4a3d7b2e8c9f0a1b2c3d4e5f60718293a4b5c6d",
+  "entries": [
+    {
+      "path": "report.md",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 4821
+    },
+    {
+      "path": "screenshots/login.png",
+      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "size": 153288
+    }
+  ],
+  "retention": {},
+  "ingested_at": "2026-09-04T16:05:40Z"
+}

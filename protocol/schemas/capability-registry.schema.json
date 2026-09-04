@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/capability-registry.schema.json",
+  "title": "3.1 能力注册表(Capability Registry)",
+  "description": "主控可查询\"这个世界里有哪些能力可授予\",不必自己持有全量工具。daemon 返回全量能力条目;授予动作见 grant-manifest.schema.json。",
+  "type": "object",
+  "required": ["protocol", "spec_version", "capabilities"],
+  "properties": {
+    "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+    "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+    "capabilities": {
+      "type": "array",
+      "description": "可授予能力条目列表",
+      "items": { "$ref": "#/$defs/capability" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "capability": {
+      "type": "object",
+      "required": ["id", "kind", "description", "grantable_scopes"],
+      "properties": {
+        "id": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/cap_id" },
+        "kind": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/cap_kind" },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "人类可读说明,如 \"GitHub 仓库/issue/PR 读写\""
+        },
+        "tools": {
+          "type": "array",
+          "description": "该能力暴露的工具名清单(文档仅 mcp_server 示例给出;其余 kind 可省略,见 README 模糊点 7)",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "risk_level": {
+          "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/risk_level",
+          "description": "风险等级,供审批决策参考"
+        },
+        "grantable_scopes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/scope" },
+          "description": "可授予的 scope 集合,如 [\"read\",\"write\",\"admin\"] 或 [\"ro\",\"rw\"]"
+        },
+        "path_template": {
+          "type": "string",
+          "minLength": 1,
+          "description": "fs_path 类能力的路径模板,支持 ${task.workdir} 等占位符(§3.1 fs:workdir 示例)"
+        }
+      },
+      "additionalProperties": false,
+      "if": {
+        "properties": { "kind": { "const": "fs_path" } },
+        "required": ["kind"]
+      },
+      "then": { "required": ["path_template"] }
+    }
+  }
+}

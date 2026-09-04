@@ -1,0 +1,29 @@
+{
+  "api": "preset/1.0",
+  "name": "e2e-tester",
+  "description": "端到端测试执行者:跑 Playwright 用例并输出报告",
+  "base": "any",
+  "model": {
+    "tier": "standard",
+    "fallback": ["standard", "fast"]
+  },
+  "skills": ["playwright-basics"],
+  "idempotent": true,
+  "baseline_grants": [
+    { "cap": "fs:workdir", "scope": "rw" },
+    { "cap": "mcp:playwright", "scope": "write" }
+  ],
+  "io_contracts": {
+    "inputs": [
+      { "name": "test_plan", "type": "file:markdown" }
+    ],
+    "outputs": [
+      { "name": "test_report", "type": "file:markdown" },
+      { "name": "artifacts", "type": "dir" }
+    ]
+  },
+  "escalation_policy": {
+    "auto_approve": [],
+    "require_approval": ["*"]
+  }
+}

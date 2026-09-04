@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/messaging.schema.json",
+  "title": "3.4 消息通道(Messaging)",
+  "description": "特殊通信渠道的规范化,复用同一条通道承载审批流(tool.request 见 grant-manifest.schema.json)。语义:按 ID 点对点(主控→子、子→主控双向)、广播(可选能力,握手协商)、纠偏指令结构化(kind + ref + traversal)。根类型:信封类(§3 总则决议)——首层 protocol + spec_version,顶层 oneOf:msg.direct / msg.broadcast / msg.feedback。",
+  "oneOf": [
+    { "$ref": "#/$defs/msgDirect" },
+    { "$ref": "#/$defs/msgBroadcast" },
+    { "$ref": "#/$defs/msgFeedback" }
+  ],
+  "$defs": {
+    "msgDirect": {
+      "type": "object",
+      "description": "按 ID 点对点消息(§3.4 示例)",
+      "required": ["protocol", "spec_version", "type", "to", "body"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "type": { "const": "msg.direct" },
+        "to": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/agent_id" },
+        "body": {
+          "type": "object",
+          "description": "消息体,结构开放(文档示例为 { … })"
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["low", "normal", "high"],
+          "default": "normal",
+          "description": "优先级,缺省 normal"
+        }
+      },
+      "additionalProperties": false
+    },
+    "msgBroadcast": {
+      "type": "object",
+      "description": "广播消息(可选能力:接入方在握手时声明 broadcast=false 则 daemon 降级为逐个点对点投递)",
+      "required": ["protocol", "spec_version", "type", "topic", "body"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "type": { "const": "msg.broadcast" },
+        "topic": {
+          "type": "string",
+          "minLength": 1,
+          "description": "广播主题,如 deps-changed"
+        },
+        "body": {
+          "type": "object",
+          "description": "消息体,结构开放(文档示例为 { … })"
+        }
+      },
+      "additionalProperties": false
+    },
+    "msgFeedback": {
+      "type": "object",
+      "description": "结构化纠偏指令:kind + ref + traversal(§3.4 示例)",
+      "required": ["protocol", "spec_version", "type", "to", "kind", "ref", "body", "traversal"],
+      "properties": {
+        "protocol": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/protocol" },
+        "spec_version": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/spec_version" },
+        "type": { "const": "msg.feedback" },
+        "to": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/agent_id" },
+        "kind": {
+          "type": "string",
+          "enum": ["correction", "question", "ack"],
+          "description": "反馈类型:纠偏 / 提问 / 确认"
+        },
+        "ref": {
+          "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/artifact_ref",
+          "description": "反馈指向的工件,如 artifact:test_report"
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "description": "反馈正文,如 \"登录用例断言反了,重做\"(注意:feedback 的 body 是字符串,与 direct/broadcast 的对象 body 不同,见 README 模糊点 5)"
+        },
+        "traversal": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "有界反馈计数,对应编排 feedback.max_traversals;超限升级给主控(§3.5b)"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

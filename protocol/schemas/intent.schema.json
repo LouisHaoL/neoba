@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoba.dev/schemas/intent.schema.json",
+  "title": "3.5(a) 编排需求单(Intent Spec)",
+  "description": "主控唯一要填的东西:目标 + 验收标准 + 约束。验收标准是结果验收的依据;forbidden_caps 是全局禁授清单(PlanCheck 据此做禁授能力检查)。根类型:文档类(§3 总则决议)——首层只用 api,禁止 protocol/spec_version,版本按 kind 独立 semver 演进。",
+  "type": "object",
+  "required": ["api", "goal", "acceptance", "constraints"],
+  "properties": {
+    "api": {
+      "const": "intent/1.0",
+      "description": "文档类自版本标识,格式 <kind>/<major.minor>(§3 总则根类型决议);semver 兼容规则作用于本轴"
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1,
+      "description": "需求目标,如 \"为订单模块新增优惠券功能并通过全部测试\""
+    },
+    "acceptance": {
+      "type": "array",
+      "minItems": 1,
+      "description": "验收标准,结果验收的依据;PlanCheck 要求每个 acceptance 至少被一个 output 覆盖(§3.5c)",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "constraints": {
+      "type": "object",
+      "description": "编排约束(文档示例给出全部三键,均不强制单列必填)",
+      "properties": {
+        "max_parallel": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "最大并行度,如 3"
+        },
+        "budget_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "token 预算,如 2000000(YAML 中的 2_000_000)"
+        },
+        "forbidden_caps": {
+          "type": "array",
+          "description": "全局禁授清单:任何授予(基线/升级)不得包含,如 [mcp:prod-db]。匹配语义(§3 总则通用 Schema 约定):默认精确匹配;\"*\" 仅整串通配(禁授一切能力);前缀通配必须用显式语法 \"mcp:*\" = 命中 mcp 命名空间下全部 cap;匹配规则写死于 PlanCheck,不允许实现自定义模糊匹配",
+          "items": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/cap_id_or_wildcard" }
+        },
+        "allowed_models": {
+          "type": "array",
+          "items": { "$ref": "https://neoba.dev/schemas/common.schema.json#/$defs/identifier_or_wildcard" },
+          "default": ["*"],
+          "description": "模型准入 allowlist,与 forbidden_caps 平级(§3.5a v0.2);具体模型名经 §3.9 解析。准入是安全面:准入不过是一票否决,评分只是排序。匹配语义同 forbidden_caps:精确匹配,\"*\" 仅整串通配,前缀通配显式语法(§3 总则)"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "not": {
+    "anyOf": [
+      { "required": ["protocol"] },
+      { "required": ["spec_version"] }
+    ]
+  }
+}

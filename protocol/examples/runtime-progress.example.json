@@ -1,0 +1,15 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "agent_id": "task-42/e2e-tester-01",
+  "step": "运行 Playwright 用例(12/30)",
+  "tokens_in": 48210,
+  "tokens_out": 9340,
+  "artifacts": [
+    {
+      "name": "test_report",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "last_error": null
+}

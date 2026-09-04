@@ -1,0 +1,23 @@
+{
+  "protocol": "1.0",
+  "spec_version": "0.2",
+  "daemon_version": "0.1.0",
+  "capabilities": {
+    "broadcast": true,
+    "async_events": true,
+    "interactive_approval": true
+  },
+  "document_kinds": {
+    "workflow": ["1.0"],
+    "preset": ["1.0"],
+    "intent": ["1.0"],
+    "artifact-manifest": ["1.0"]
+  },
+  "errors": [],
+  "degradations": [
+    {
+      "feature": "broadcast",
+      "reason": "接入方不支持广播,daemon 将 msg.broadcast 降级为逐个 msg.direct 投递"
+    }
+  ]
+}
