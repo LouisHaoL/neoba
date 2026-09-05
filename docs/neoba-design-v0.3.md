@@ -237,6 +237,8 @@ escalation_policy:               # 升级申请默认策略(可被主控会话�
 
 **协议层硬底线(不进配置,不可被任何层级覆盖)**:`risk_level = high` 且 scope ∈ {write, admin} 的能力,禁止自动放行。每条审批记录必须带 `decision_source: auto_rule:{id} | manual:{principal}`,自动放行同样全量入审计——调参依据是"默认规则放行次数 × 事后问题率"。
 
+**实现边界(v0.x 已知边界)**:引擎不因 `escalation.require_approval` 命中而自动挂起节点/提交审批单;pending 审批单经公开 RPC `approvals.submit`(外部编排者/主控发起,复用台账校验与审计语义)显式产生,审批闭环由 submit → list → decide 在公面走通。
+
 安全不变量:
 - **分层物理性**(§1.3):fs/网络/MCP 存在性由容器层保证;基座权限模式仅为纵深防御;
 - **最小化**:基线 = 完成典型任务的最小集;升级 = 用完即走;

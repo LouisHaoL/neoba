@@ -6,8 +6,8 @@
  *   artifacts.publish / artifacts.resolve / artifacts.read / grants.of
  * P2(workflow.run = task.create 的多节点形态;task.create 保持单节点闭环不变):
  *   workflow.run / task.pause / task.resume / task.cancel /
- *   approvals.list / approvals.decide / budget.status / budget.raise /
- *   models.list / models.feedback
+ *   approvals.list / approvals.submit / approvals.decide /
+ *   budget.status / budget.raise / models.list / models.feedback
  * M4(观测线):
  *   events.list(读走 EventLog.readByPrincipal;admin 全量,session 身份
  *   锁死绑定命名空间)
@@ -30,7 +30,7 @@ import type {
   PrincipalFilter,
 } from '../events/index.ts';
 import type { GrantAuditEvent } from '../capability/index.ts';
-import type { EventSink, GrantExecutor, LoadedRegistry, Preset } from '../capability/index.ts';
+import type { EventSink, GrantExecutor, LoadedRegistry, Preset, Scope } from '../capability/index.ts';
 import type { DaemonProfile, SessionRegistry } from '../session/index.ts';
 import { handleSessionInit } from '../session/index.ts';
 import { checkWorkflow } from '../plancheck/index.ts';
@@ -200,6 +200,8 @@ export class Operations {
         return this.taskCancel(params, identity);
       case 'approvals.list':
         return this.approvalsList(params, identity);
+      case 'approvals.submit':
+        return this.approvalsSubmit(params, identity);
       case 'approvals.decide':
         return this.approvalsDecide(params, identity);
       case 'budget.status':
@@ -701,6 +703,45 @@ export class Operations {
     return { approvals: visible };
   }
 
+  /**
+   * 提交审批单(§3.3 tool.request 的公面入口):外部编排者/主控可据此发起
+   * 审批闭环 —— v0.x 引擎不因 escalation.require_approval 自动挂起(已知
+   * 边界),pending 单一律经本操作显式产生,复用 ApprovalBoard.submit 的
+   * 校验(cap/scope/duration)与台账语义,不另起炉灶。
+   *
+   * 申请人 agent 取任务记录的 agent_id(task.create 任务 = <task>/worker-01,
+   * workflow 任务 = <task>);会话鉴权与现有写操作一致(#requireTask:session
+   * token 只能为本会话名下任务提交,异主 → SESSION_FORBIDDEN 403)。
+   */
+  async approvalsSubmit(params: unknown, identity: RequestIdentity = ADMIN_IDENTITY): Promise<unknown> {
+    const board = this.#ctx.board;
+    if (board === undefined) {
+      throw new RpcError(-32020, 'approvals.submit: daemon 未配置审批台账', {
+        data: { code: 'BOARD_NOT_WIRED' },
+        httpStatus: 501,
+      });
+    }
+    const p = requireObject(params, 'approvals.submit');
+    const taskId = requireString(p, 'task_id', 'approvals.submit');
+    const task = this.#requireTask(taskId, identity);
+    const cap = requireString(p, 'cap', 'approvals.submit');
+    const scope = requireString(p, 'scope', 'approvals.submit');
+    const duration = requireString(p, 'duration', 'approvals.submit');
+    const reason = optionalString(p, 'reason', 'approvals.submit') ?? '';
+    const reqId = optionalString(p, 'req_id', 'approvals.submit') ?? newReqId(this.#ctx.now);
+    const result = await board.submit({
+      from: task.agentId,
+      reqId,
+      cap,
+      reason,
+      scope: scope as Scope,
+      duration,
+    });
+    return result.status === 'auto_granted'
+      ? { req_id: result.record.reqId, status: result.status, record: result.record, manifest: result.manifest }
+      : { req_id: result.record.reqId, status: result.status, record: result.record };
+  }
+
   async approvalsDecide(params: unknown, identity: RequestIdentity = ADMIN_IDENTITY): Promise<unknown> {
     const board = this.#ctx.board;
     if (board === undefined) {
@@ -917,6 +958,7 @@ export const OPERATIONS: readonly string[] = [
   'task.resume',
   'task.cancel',
   'approvals.list',
+  'approvals.submit',
   'approvals.decide',
   'budget.status',
   'budget.raise',
@@ -930,6 +972,13 @@ function newTaskId(now?: () => Date): string {
   const t = (now?.() ?? new Date()).getTime().toString(36);
   const r = Math.random().toString(36).slice(2, 8);
   return `task-${t}-${r}`;
+}
+
+/** 审批单 id 缺省生成:`req-` + 时间戳基36 + 随机段(approvals.submit 未显式给 req_id 时)。 */
+function newReqId(now?: () => Date): string {
+  const t = (now?.() ?? new Date()).getTime().toString(36);
+  const r = Math.random().toString(36).slice(2, 8);
+  return `req-${t}-${r}`;
 }
 
 function budgetSnapshot(ledger: BudgetLedger): Record<string, unknown> {

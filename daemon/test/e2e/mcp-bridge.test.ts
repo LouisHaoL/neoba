@@ -28,7 +28,7 @@ async function initialize(bridge: BridgeClient): Promise<Record<string, unknown>
 }
 
 describe('e2e · MCP 桥子进程', () => {
-  it('initialize 握手 + tools/list 恰好 19 工具', async () => {
+  it('initialize 握手 + tools/list 恰好 20 工具', async () => {
     const daemon = await bootDaemon();
     kept.push(daemon.stateDir);
     let bridge: BridgeClient | null = null;
@@ -41,10 +41,10 @@ describe('e2e · MCP 桥子进程', () => {
 
       const tools = await bridge.request('tools/list', {});
       const toolList = ((tools.body['result'] as Record<string, unknown>)['tools'] ?? []) as Array<{ name: string }>;
-      assert.equal(toolList.length, 19, `桥应暴露 19 工具,实际 ${toolList.length}:${toolList.map((t) => t.name).join(',')}`);
+      assert.equal(toolList.length, 20, `桥应暴露 20 工具,实际 ${toolList.length}:${toolList.map((t) => t.name).join(',')}`);
       for (const expected of ['session_init', 'task_create', 'task_status', 'approvals_list', 'budget_status', 'events_missing_probe']) {
         if (expected === 'events_missing_probe') {
-          assert.ok(!toolList.some((t) => t.name === 'events_list'), 'events.list 未上桥(已知缺口,钉住不回归成 20)');
+          assert.ok(!toolList.some((t) => t.name === 'events_list'), 'events.list 未上桥(已知缺口,钉住不回归成 21)');
         } else {
           assert.ok(toolList.some((t) => t.name === expected), `工具应含 ${expected}`);
         }

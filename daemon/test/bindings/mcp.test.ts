@@ -121,14 +121,14 @@ describe('MCP initialize 握手', () => {
 });
 
 describe('tools/list 与 tools/call 全流程(真实 daemon)', () => {
-  it('tools/list 列出 daemon 操作全集(P1 + P2,共 19 个)', async () => {
+  it('tools/list 列出 daemon 操作全集(P1 + P2,共 20 个)', async () => {
     const daemon = await start();
     const harness = await initializedHarness(daemon);
     const res = await harness.call({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     const names = (res['result']['tools'] as any[]).map((t) => t['name']);
-    assert.equal(names.length, 19);
+    assert.equal(names.length, 20);
     assert.deepEqual(names.sort(), [
-      'approvals_decide', 'approvals_list',
+      'approvals_decide', 'approvals_list', 'approvals_submit',
       'artifacts_publish', 'artifacts_read', 'artifacts_resolve',
       'budget_raise', 'budget_status',
       'capabilities_list', 'grants_of', 'models_feedback', 'models_list',

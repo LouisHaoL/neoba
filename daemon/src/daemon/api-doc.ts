@@ -165,6 +165,19 @@ export const API_OPERATIONS: readonly OperationDoc[] = [
     result: '{approvals: [...]}',
   },
   {
+    method: 'approvals.submit',
+    summary: '提交审批单(tool.request 公面入口,外部编排者发起审批闭环):复用台账校验;引擎 v0.x 不做 require_approval 自动挂起,pending 单经此显式产生',
+    params: [
+      { name: 'task_id', type: 'string', required: true, description: '申请人所属任务 id(申请人 agent 取任务记录的 agent_id)' },
+      { name: 'cap', type: 'string', required: true, description: '申请的能力(须在注册表内)' },
+      { name: 'scope', type: 'string', required: true, description: '申请的 scope(须在该 cap 的 grantable_scopes 内)' },
+      { name: 'duration', type: 'string', required: true, description: '授权时长,匹配 ^\\d+[smhd]$(如 2h)' },
+      { name: 'reason', type: 'string', required: false, description: '申请说明' },
+      { name: 'req_id', type: 'string', required: false, description: '审批单 id;缺省自动生成,重复 → REQ_DUPLICATE(-32000)' },
+    ],
+    result: '{req_id, status: pending|auto_granted, record[, manifest]};session 身份仅限本人会话任务,越权 → SESSION_FORBIDDEN(-32014/403)',
+  },
+  {
     method: 'approvals.decide',
     summary: '定案审批单;授予经 escalation 入事件流 + manifest;session 身份仅限本人会话任务',
     params: [

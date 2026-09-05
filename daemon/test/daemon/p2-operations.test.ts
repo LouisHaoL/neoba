@@ -315,6 +315,122 @@ describe('P2 接线:审批 RPC(人机入口)', () => {
   });
 });
 
+// ---------------------------------------------------------------- #3 审批公面入口
+
+describe('approvals.submit(审批公面入口,外部编排者发起审批闭环)', () => {
+  it('submit → list 可见 pending → decide(approve)→ 状态流转 + escalation 授予可查', async () => {
+    const handle = await start();
+    const created = resultOf(await rpc(handle, 'task.create', { intent: '公面审批', preset: 'minimal' }));
+    const taskId = created['task_id'] as string;
+    const agentId = created['agent_id'] as string;
+
+    // 提交:返回 req_id,status=pending(策略缺省从严)
+    const submitted = resultOf(await rpc(handle, 'approvals.submit', {
+      task_id: taskId,
+      cap: 'mcp:playwright',
+      scope: 'write',
+      duration: '2h',
+      reason: '需要浏览器验证',
+    }));
+    assert.equal(submitted['status'], 'pending');
+    const reqId = submitted['req_id'] as string;
+    assert.match(reqId, /^req-/);
+    assert.equal((submitted['record'] as Record<string, unknown>)['agentId'], agentId);
+
+    // 台账可见(pending)
+    const list = resultOf(await rpc(handle, 'approvals.list', { status: 'pending' }));
+    assert.deepEqual(
+      (list['approvals'] as { reqId: string }[]).map((r) => r.reqId),
+      [reqId],
+    );
+
+    // 定案通过 → granted + escalation 授予落 manifest
+    const decided = resultOf(await rpc(handle, 'approvals.decide', {
+      req_id: reqId,
+      decision: 'granted',
+      by: 'ops-1',
+    }));
+    assert.equal(decided['decision'], 'granted');
+
+    const manifest = resultOf(await rpc(handle, 'grants.of', { agent_id: agentId }));
+    const grants = (manifest['manifest'] as Record<string, unknown>)['grants'] as Record<string, unknown>[];
+    const escalated = grants.find((g) => g['cap'] === 'mcp:playwright');
+    assert.equal(escalated?.['source'], `escalation:${reqId}`);
+
+    // 全链路审计事件齐备(approval.requested / decided)
+    const events = await allEvents(handle);
+    assert.ok(events.some((e) => e.type === 'approval.requested'));
+    assert.ok(events.some((e) => e.type === 'approval.decided'));
+
+    // 定案后 pending 队列清空
+    const after = resultOf(await rpc(handle, 'approvals.list', { status: 'pending' }));
+    assert.equal((after['approvals'] as unknown[]).length, 0);
+  });
+
+  it('会话 token 提交他人任务 → 403 SESSION_FORBIDDEN;本人任务放行', async () => {
+    const handle = await start();
+    const adminTask = resultOf(await rpc(handle, 'task.create', { intent: 'admin 的任务', preset: 'minimal' }));
+    const foreignTaskId = adminTask['task_id'] as string;
+
+    const token = await sessionToken(handle, 'acme', 'dev-1');
+    const foreign = await rpcAs(handle, token, 'approvals.submit', {
+      task_id: foreignTaskId,
+      cap: 'mcp:playwright',
+      scope: 'read',
+      duration: '1h',
+    });
+    assert.equal(foreign.status, 403);
+    const err = foreign.body['error'] as Record<string, unknown>;
+    assert.equal(err['code'], -32014);
+    assert.equal((err['data'] as Record<string, unknown>)['code'], 'SESSION_FORBIDDEN');
+
+    // 本会话任务:提交放行,台账落单
+    const own = resultOf(
+      (await rpcAs(handle, token, 'task.create', { intent: '自己的任务', preset: 'minimal' })).body,
+    );
+    const submitted = resultOf(
+      (await rpcAs(handle, token, 'approvals.submit', {
+        task_id: own['task_id'],
+        cap: 'mcp:playwright',
+        scope: 'read',
+        duration: '1h',
+      })).body,
+    );
+    assert.equal(submitted['status'], 'pending');
+  });
+
+  it('复用 board.submit 校验:未知 cap / 非法 duration / 重复 req_id → -32000 域错误', async () => {
+    const handle = await start();
+    const created = resultOf(await rpc(handle, 'task.create', { intent: '校验', preset: 'minimal' }));
+    const taskId = created['task_id'] as string;
+
+    const unknownCap = await rpc(handle, 'approvals.submit', {
+      task_id: taskId, cap: 'cap:ghost', scope: 'read', duration: '1h',
+    });
+    assert.equal(((unknownCap['error'] as Record<string, unknown>)['data'] as Record<string, unknown>)['code'], 'CAP_UNKNOWN');
+
+    const badDuration = await rpc(handle, 'approvals.submit', {
+      task_id: taskId, cap: 'mcp:playwright', scope: 'read', duration: 'forever',
+    });
+    assert.equal(((badDuration['error'] as Record<string, unknown>)['data'] as Record<string, unknown>)['code'], 'DURATION_INVALID');
+
+    const first = resultOf(await rpc(handle, 'approvals.submit', {
+      task_id: taskId, cap: 'mcp:playwright', scope: 'read', duration: '1h', req_id: 'req-fixed',
+    }));
+    assert.equal(first['req_id'], 'req-fixed');
+    const dup = await rpc(handle, 'approvals.submit', {
+      task_id: taskId, cap: 'mcp:playwright', scope: 'read', duration: '1h', req_id: 'req-fixed',
+    });
+    assert.equal(((dup['error'] as Record<string, unknown>)['data'] as Record<string, unknown>)['code'], 'REQ_DUPLICATE');
+
+    // 任务不存在 → TASK_NOT_FOUND(404)
+    const ghost = await rpc(handle, 'approvals.submit', {
+      task_id: 'task-ghost', cap: 'mcp:playwright', scope: 'read', duration: '1h',
+    });
+    assert.equal(ghost['error'] && (ghost['error'] as Record<string, unknown>)['code'], -32010);
+  });
+});
+
 describe('P2 接线:模型评分 RPC 与持久化', () => {
   function entryDoc(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {

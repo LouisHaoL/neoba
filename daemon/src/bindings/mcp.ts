@@ -255,6 +255,25 @@ const TOOLS: readonly McpToolDef[] = [
     needsSession: false,
   },
   {
+    name: 'approvals_submit',
+    description:
+      '提交审批单(tool.request 公面入口):为本会话任务申请能力升级,落台账返回 req_id;' +
+      '引擎 v0.x 不做 require_approval 自动挂起,审批闭环由外部经 submit → decide 走通。',
+    inputSchema: {
+      type: 'object',
+      required: ['task_id', 'cap', 'scope', 'duration'],
+      properties: {
+        task_id: { type: 'string', description: '申请人所属任务 id' },
+        cap: { type: 'string', description: '申请的能力(须在注册表内)' },
+        scope: { type: 'string', description: '申请的 scope' },
+        duration: { type: 'string', description: '授权时长,如 2h' },
+        reason: { type: 'string', description: '申请说明' },
+        req_id: { type: 'string', description: '审批单 id(缺省自动生成)' },
+      },
+    },
+    needsSession: false,
+  },
+  {
     name: 'approvals_decide',
     description: '定案审批单(granted/denied);admin 可带 by,窄化用 narrowed_to。',
     inputSchema: {
