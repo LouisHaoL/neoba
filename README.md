@@ -3,7 +3,7 @@
 多 Agent 协作协议：N 主控 harness × N 执行基座自由组合。协议即产品，daemon 只是参考实现。
 
 - 设计文档：[docs/neoba-design-v0.3.md](docs/neoba-design-v0.3.md)（历史版本 v0.1/v0.2 留档）
-- 状态：P0 协议冻结 + P1 最小闭环 + P2 编排与审批 + P3 多 session/多基座 + P4 观测与沙箱进阶 已全部落地（2026-09-05，全仓 649/649 测试）
+- 状态：P0 协议冻结 + P1 最小闭环 + P2 编排与审批 + P3 多 session/多基座 + P4 观测与沙箱进阶 已全部落地（2026-09-05，全仓 686/686 测试(649 基线 + e2e 37)）
 - 许可：[Apache-2.0](LICENSE)
 
 ## 目录约定
@@ -38,7 +38,7 @@ docs/       设计文档
 | P4 · M4:观测线 `events.list` + OpenAPI 3.1(`GET /openapi.json`,api-doc 一致性单测防漂移)+ SSE 事件流(replay+live 去重)+ 零构建只读 dashboard | ✅ |
 | P4 · M6:Linux keyring 后端(libsecret `secret-tool` 桥)+ `createSecretStore` 工厂 + `neoba.config.json` 生产接线 + doctor `keyringReady` | ✅ |
 | P4 · M7:microsandbox(Firecracker microVM)后端 + provider 工厂(memory/docker/microsandbox)+ warm pool(snapshot 回热,与 ResourceGate 共槽)+ 镜像配置注入 | ✅ |
-| 一致性测试:全仓 649/649(golden 01–08 零漂移回归) | ✅ |
+| 一致性测试:全仓 686/686(golden 01–08 零漂移回归 + e2e 子进程 32 + 驱动/审计回归) | ✅ |
 
 运行示例:`neoba workflow check presets/examples/workflow.json --presets presets/examples --intent presets/examples/intent.json`
 
