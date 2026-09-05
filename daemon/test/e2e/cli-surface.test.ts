@@ -20,11 +20,14 @@ import {
 const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
 
 const kept: string[] = [];
+let shared: E2eDaemon | null = null;
+
 after(async () => {
+  // 共享 daemon 必须显式停机:子进程句柄不释放会让本文件的测试进程无法退出,
+  // 串行跑全量时表现为「本文件全部通过后套件悬挂」。
+  if (shared !== null) await shared.stop().catch(() => {});
   await Promise.all(kept.map((dir) => cleanupStateDir(dir)));
 });
-
-let shared: E2eDaemon | null = null;
 
 /** 共享一台 daemon(每用例独立任务,避免每例冷启动)。 */
 async function sharedDaemon(): Promise<E2eDaemon> {
