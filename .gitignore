@@ -5,3 +5,4 @@ dist/
 .neoba/
 neoba-dbg*/
 *.tmp
+.claude/

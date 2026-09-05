@@ -1,0 +1,15 @@
+[
+  {
+    "api": "preset/1.0",
+    "name": "coder",
+    "description": "e2e 执行者桩:发布 code 端口工件(内容由 boot.ts 假基座注入)",
+    "base": "any",
+    "skills": [],
+    "baseline_grants": [{ "cap": "fs:workdir", "scope": "rw" }],
+    "io_contracts": {
+      "inputs": [{ "name": "code", "type": "text" }],
+      "outputs": [{ "name": "code", "type": "text" }]
+    },
+    "escalation_policy": { "auto_approve": [], "require_approval": ["*"] }
+  }
+]
