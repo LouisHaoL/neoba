@@ -21,6 +21,18 @@ export type EngineEmit = <P extends EventType>(
   input: EventInput<P>,
 ) => Promise<unknown> | unknown;
 
+/**
+ * 基线授予审计上下文(与 daemon 侧 ApplyContext 同形:principal 带 task/agent
+ * 两层 + cap→scope 队列)。grant 审计 sink 据此决定事件归属与 scope ——
+ * task.create 路径经 AsyncLocalStorage 携带,引擎路径由 NodeExecutor 显式给出,
+ * 引擎模块不反向依赖 daemon 的 ALS 装配(结构同形,两边各自演进)。
+ */
+export interface GrantAuditContext {
+  readonly principal: Principal;
+  /** 同一 cap 可能授多个 scope,sink 事件只带 cap,按 FIFO 弹出。 */
+  readonly scopeQueue: Map<string, string[]>;
+}
+
 // ---------------------------------------------------------------- NodeRuntime
 
 /** 节点产物(runtime 上报,引擎负责发布进 CAS —— 写屏障在 daemon 侧,§3.7)。 */

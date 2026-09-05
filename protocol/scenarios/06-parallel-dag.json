@@ -1,7 +1,7 @@
 {
   "api": "scenario/1.0",
   "scenario": "06-parallel-dag",
-  "description": "并行 DAG:workflow.run 提交 菱形 工作流(u → {a ∥ b} → c, intent.constraints.max_parallel=2)→ await 到终态 completed。并行批内 a/b 的启动顺序不确定,事件断言用 set 模式(无序多重集包含):四个节点各 started/completed 一次,c 的端口工件发布入账。串行 DAG 的有序断言由场景 01/02 覆盖,本场景钉住 §3.5 P3 并行语义的集合级不变量。",
+  "description": "并行 DAG:workflow.run 提交 菱形 工作流(u → {a ∥ b} → c, intent.constraints.max_parallel=2)→ await 到终态 completed。并行批内 a/b 的启动顺序不确定,事件断言用 set 模式(无序多重集包含):四个节点各 started/completed 一次,基线授予逐节点落 grant.granted(fs:workdir rw,principal 带 task/agent 两层,与 task.create 路径同一事件形状,issue #1),c 的端口工件发布入账。串行 DAG 的有序断言由场景 01/02 覆盖,本场景钉住 §3.5 P3 并行语义的集合级不变量。",
   "protocol_refs": [
     "§3.5 WorkflowSpec(节点 parallel 语义,intent.constraints.max_parallel 上限)",
     "§3.7 交付契约(端口工件发布 = 写屏障)",
@@ -79,6 +79,10 @@
       { "type": "node.completed", "payload": { "nodeId": "a" } },
       { "type": "node.completed", "payload": { "nodeId": "b" } },
       { "type": "node.completed", "payload": { "nodeId": "c" } },
+      { "type": "grant.granted", "payload": { "cap": "fs:workdir", "scope": "rw", "source": "baseline" } },
+      { "type": "grant.granted", "payload": { "cap": "fs:workdir", "scope": "rw", "source": "baseline" } },
+      { "type": "grant.granted", "payload": { "cap": "fs:workdir", "scope": "rw", "source": "baseline" } },
+      { "type": "grant.granted", "payload": { "cap": "fs:workdir", "scope": "rw", "source": "baseline" } },
       { "type": "sandbox.destroyed" },
       { "type": "sandbox.destroyed" },
       { "type": "sandbox.destroyed" },
