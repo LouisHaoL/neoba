@@ -302,7 +302,8 @@ export async function sseCollect(
 
 export interface BridgeClient {
   request(method: string, params?: unknown): Promise<{ id: number; body: Record<string, unknown> }>;
-  notifications(): string[];
+  /** 已收到的桥通知行(同一数组实例持续追加)。 */
+  readonly notifications: string[];
   stop(): Promise<ProcOutcome>;
 }
 

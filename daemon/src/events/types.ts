@@ -5,7 +5,8 @@
  * 与 protocol/schemas/runtime-api.schema.json 的关系:那边是容器侧(sidecar SSE)
  * 的五种统一事件(tool_call / message_delta / artifact_ready / usage / error),
  * 这边是 daemon 自身的事件溯源日志 —— 同一套 ts / agent / sha256 格式约定,
- * 事件类别是超集:容器生命周期、授权、工件、编排、预算、审批、correction、daemon。
+ * 事件类别是超集:容器生命周期、授权、工件、编排、基座运行事件
+ * (§3.6 归一的 tool_inventory / usage)、预算、审批、correction、daemon。
  *
  * principal 四层命名空间(§2/§10.4):tenant → session → task → agent,
  * 按层级可空(daemon 级事件只有 tenant;task 级事件无 agent)。
@@ -56,6 +57,9 @@ export const EVENT_TYPES = [
   'node.started',
   'node.completed',
   'node.failed',
+  // 基座运行事件(§3.6 归一事件入账;§6 审计日志 = 事件日志同一份)
+  'tool_inventory',
+  'usage',
   // 预算(§3.5f,占位:P2 落地)
   'budget.warning',
   'budget.exceeded',
@@ -217,6 +221,37 @@ export interface NodeFailedPayload extends EventPayloadBase {
   readonly detail?: string;
 }
 
+// ---------------------------------------------------------------- 基座运行事件(§3.6)
+
+/**
+ * §3.6 tool_inventory 归一事件落账(§6:审计日志 = 事件日志同一份)。
+ * nodeId/attempt 是 daemon 侧节点上下文(与 node.* 事件同形);
+ * 清单本体是 harness adapter 归一后的权威清单(§3.6 唯一事实源),
+ * 字段按 daemon payload 惯例转写为 camelCase。
+ */
+export interface ToolInventoryPayload extends EventPayloadBase {
+  readonly nodeId: string;
+  readonly attempt: number;
+  readonly tools: readonly string[];
+  readonly mcpServers: readonly string[];
+  readonly permissionMode: string | null;
+  readonly model: string | null;
+  readonly sessionId: string | null;
+}
+
+/**
+ * §3.6 usage 归一事件落账:用量事实恒入事件日志(审计),预算台账
+ * (§3.5f)是独立的消费方 —— 无 budget 配置时只跳过记账,不丢事实。
+ */
+export interface UsagePayload extends EventPayloadBase {
+  readonly nodeId: string;
+  readonly attempt: number;
+  readonly tokensIn: number;
+  readonly tokensOut: number;
+  /** 订阅制基座(无计费信息)为 null,与 §3.6 统一事件同语义。 */
+  readonly costEstimate: number | null;
+}
+
 // ---------------------------------------------------------------- 预算(§3.5f 占位)
 
 export interface BudgetPayload extends EventPayloadBase {
@@ -287,6 +322,8 @@ export interface EventPayloads {
   'node.started': NodeStartedPayload;
   'node.completed': NodeCompletedPayload;
   'node.failed': NodeFailedPayload;
+  'tool_inventory': ToolInventoryPayload;
+  usage: UsagePayload;
   'budget.warning': BudgetPayload;
   'budget.exceeded': BudgetPayload;
   'approval.requested': ApprovalRequestedPayload;

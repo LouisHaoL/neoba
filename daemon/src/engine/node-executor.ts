@@ -2,8 +2,9 @@
  * NodeExecutor(§3.5 单节点执行;§9 P1 执行链闭环、P2 接入引擎):
  *
  *   node.started → 供给沙箱 → secret 注入 → 基线授予 → 跑 NodeRuntime →
- *   usage 记账(budget)→ 工件发布(CAS 写屏障,sha256 权威哈希)→
- *   node.completed / node.failed → 销毁沙箱
+ *   §3.6 归一事件落账(tool_inventory/usage)→ usage 记账(budget)→
+ *   工件发布(CAS 写屏障,sha256 权威哈希)→ node.completed / node.failed →
+ *   销毁沙箱
  *
  * 语义要点:
  * - 工件以 runtime 上报的产物为准(真实侧 = sidecar 读文件系统事实,
@@ -307,7 +308,7 @@ export class NodeExecutor {
     return outcome;
   }
 
-  /** 成功路径收尾:usage 记账 → 产物发布 → node.completed。失败即短路。 */
+  /** 收尾:§3.6 归一事件落账 → usage 记账 → 产物发布 → node.completed。失败即短路。 */
   async #settle(
     params: ExecuteNodeParams,
     principal: Principal,
@@ -315,6 +316,41 @@ export class NodeExecutor {
   ): Promise<NodeExecutionResult> {
     const { nodeId, attempt } = params;
     const budget = params.budget;
+
+    // §3.6 归一运行事件随任务落账(§6:审计日志 = 事件日志同一份):
+    // tool_inventory(唯一事实源的权威清单)与 usage 先于记账/发布入账,
+    // 即使随后 budget 熔断或产物缺失,事实也已留痕;无 budget 配置时
+    // usage 照落事件,只是没有台账消费方(§3.5f 记账是独立环节)。
+    for (const event of result.events) {
+      if (event.event === 'tool_inventory') {
+        await this.#deps.emit({
+          type: 'tool_inventory',
+          principal,
+          payload: {
+            nodeId,
+            attempt,
+            tools: event.tools,
+            mcpServers: event.mcp_servers,
+            permissionMode: event.permission_mode,
+            model: event.model,
+            sessionId: event.session_id,
+          },
+        });
+      } else if (event.event === 'usage') {
+        await this.#deps.emit({
+          type: 'usage',
+          principal,
+          payload: {
+            nodeId,
+            attempt,
+            tokensIn: event.tokens_in,
+            tokensOut: event.tokens_out,
+            costEstimate: event.cost_estimate,
+            ...(event.extra !== undefined ? { extra: event.extra } : {}),
+          },
+        });
+      }
+    }
 
     // §3.6 usage 事实 → 预算台账(§3.5f);hard 触发立即熔断pause。
     for (const event of result.events) {

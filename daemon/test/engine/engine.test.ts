@@ -101,6 +101,19 @@ function usageEvent(tokensIn: number, tokensOut: number) {
   };
 }
 
+function inventoryEvent() {
+  return {
+    ts: new Date().toISOString(),
+    agent: null,
+    event: 'tool_inventory' as const,
+    tools: ['Read', 'Write'],
+    mcp_servers: ['playwright'],
+    permission_mode: 'default',
+    model: 'fake-model',
+    session_id: 'fake-sess',
+  };
+}
+
 async function setup(
   presets: Readonly<Record<string, Preset>>,
   runtime: NodeRuntime & { readonly calls?: ReadonlyMap<string, number> },
@@ -328,6 +341,8 @@ describe('engine/WorkflowEngine', () => {
     assert.equal(first.status, 'paused');
     assert.equal(first.failedNode, 'n1');
     assert.equal(first.failReason, 'budget_paused');
+    // 落账先于记账:触发熔断的 usage 事实本身已入事件日志(§6 审计同一份)。
+    assert.equal(eventsOf(events, 'usage', 'n1').length, 1);
     const failed = eventsOf(events, 'node.failed', 'n1');
     assert.equal((failed[0]?.payload as { reason: string }).reason, 'budget_paused');
     assert.equal(engine.pause('task-budget'), false); // paused 状态由 budget 挂起,pause 不重复
@@ -336,6 +351,56 @@ describe('engine/WorkflowEngine', () => {
     const second = await engine.resume('task-budget');
     assert.equal(second.status, 'completed');
     assert.ok(budgetEvents.some((e) => (e as { type: string }).type === 'budget.exceeded'));
+  });
+
+  it('§3.6 运行事件落账:tool_inventory / usage 随节点入事件日志(无 budget 也落)', async () => {
+    const runtime = router({
+      n1: () => ({
+        exitCode: 0,
+        events: [inventoryEvent(), usageEvent(12, 3)],
+        artifacts: [{ name: 'code', payload: 'x' }],
+      }),
+    });
+    const { engine, events } = await setup({ coder: preset('coder') }, runtime);
+    const result = await engine.run({
+      tenant: 't1',
+      session: 's1',
+      taskId: 'task-run-events',
+      workflow: workflow([{ id: 'n1', preset: 'coder' }]),
+    });
+    assert.equal(result.status, 'completed');
+
+    // 清单事件:节点上下文 + 归一清单本体
+    const inventories = eventsOf(events, 'tool_inventory', 'n1');
+    assert.equal(inventories.length, 1);
+    const inv = inventories[0]!;
+    assert.deepEqual(inv.payload, {
+      nodeId: 'n1',
+      attempt: 1,
+      tools: ['Read', 'Write'],
+      mcpServers: ['playwright'],
+      permissionMode: 'default',
+      model: 'fake-model',
+      sessionId: 'fake-sess',
+    });
+    assert.equal(inv.principal.task, 'task-run-events');
+    assert.equal(inv.principal.agent, 'task-run-events/n1');
+
+    // 用量事件:无 budget 配置也落账(记账是独立环节,不丢事实)
+    const usages = eventsOf(events, 'usage', 'n1');
+    assert.equal(usages.length, 1);
+    assert.deepEqual(usages[0]!.payload, {
+      nodeId: 'n1',
+      attempt: 1,
+      tokensIn: 12,
+      tokensOut: 3,
+      costEstimate: null,
+    });
+
+    // 顺序:归一事件在 node.started 之后、node.completed 之前
+    const order = events.map((e) => e.type);
+    assert.ok(order.indexOf('node.started') < order.indexOf('tool_inventory'));
+    assert.ok(order.indexOf('usage') < order.indexOf('node.completed'));
   });
 
   it('pause/resume:当前节点跑完后停在派发边界,resume 续跑', async () => {

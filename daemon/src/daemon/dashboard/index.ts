@@ -152,6 +152,7 @@ export const DASHBOARD_HTML = `<!doctype html>
      'sandbox.queued', 'sandbox.acquired', 'sandbox.released',
      'grant.granted', 'grant.revoked', 'artifact.published', 'artifact.gc',
      'node.started', 'node.completed', 'node.failed',
+     'tool_inventory', 'usage',
      'budget.warning', 'budget.exceeded', 'approval.requested', 'approval.decided',
      'correction', 'daemon.started', 'daemon.recovered'
     ].forEach(function (type) {

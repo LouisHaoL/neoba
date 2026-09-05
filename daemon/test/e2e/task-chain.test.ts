@@ -50,24 +50,46 @@ describe('e2e · 执行链(假基座 stream 档)', () => {
       const record = await awaitTask(daemon, taskId, { timeoutMs: 20_000 });
       assert.equal(record['status'], 'completed', `任务应完成,实际 ${JSON.stringify(record).slice(0, 400)}`);
 
-      // 事件链(子进程 EventLog):编排事实事件齐备(§3.6 归一事件的落账
-      // 边界见 issue:tool_inventory/usage 当前不入 EventLog)。
+      // 事件链(子进程 EventLog):编排事实事件齐备;§3.6 归一运行事件
+      // (tool_inventory / usage)同样随任务落账(§6 审计日志 = 事件日志同一份)。
       const events = await daemon.rpc('events.list', { task: taskId });
       const list = (events.body.result as { events: Array<{ type: string; payload: Record<string, unknown>; principal: Record<string, unknown> }> }).events;
       const types = list.map((e) => e.type);
-      for (const expected of ['node.started', 'sandbox.created', 'node.completed', 'artifact.published', 'sandbox.destroyed']) {
+      for (const expected of [
+        'node.started',
+        'sandbox.created',
+        'tool_inventory',
+        'usage',
+        'node.completed',
+        'artifact.published',
+        'sandbox.destroyed',
+      ]) {
         assert.ok(types.includes(expected), `事件应含 ${expected},实际 ${JSON.stringify(types)}`);
       }
 
       // issue #1 回归(真实进程边界):节点基线授予落 grant.granted,
       // principal 带 task/agent 两层,payload 与 task.create 路径同形。
       const grantEvents = list.filter((e) => e.type === 'grant.granted');
-      assert.equal(grantEvents.length, 1, `workflow 路径应落 1 条 grant.granted,实际 ${grantEvents.length}`);
-      assert.equal(grantEvents[0].principal['task'], taskId);
-      assert.equal(grantEvents[0].principal['agent'], `${taskId}/n1`);
-      assert.equal(grantEvents[0].payload['cap'], 'fs:workdir');
-      assert.equal(grantEvents[0].payload['scope'], 'rw');
-      assert.equal(grantEvents[0].payload['source'], 'baseline');
+      const grantEvent = grantEvents[0];
+      assert.ok(grantEvent !== undefined, `workflow 路径应落 1 条 grant.granted,实际 ${grantEvents.length}`);
+      assert.equal(grantEvent.principal['task'], taskId);
+      assert.equal(grantEvent.principal['agent'], `${taskId}/n1`);
+      assert.equal(grantEvent.payload['cap'], 'fs:workdir');
+      assert.equal(grantEvent.payload['scope'], 'rw');
+      assert.equal(grantEvent.payload['source'], 'baseline');
+
+      // 归一事件带节点上下文:清单为权威事实(假基座 init 行),用量为 result 行聚合
+      const inventory = list.find((e) => e.type === 'tool_inventory');
+      assert.ok(inventory !== undefined);
+      assert.equal(inventory.payload['nodeId'], 'n1');
+      assert.deepEqual(inventory.payload['tools'], ['Read', 'Write', 'Edit', 'Bash']);
+      assert.equal(inventory.payload['model'], 'e2e-fake-model');
+      const usage = list.find((e) => e.type === 'usage');
+      assert.ok(usage !== undefined);
+      assert.equal(usage.payload['nodeId'], 'n1');
+      assert.equal(usage.payload['tokensIn'], 10);
+      assert.equal(usage.payload['tokensOut'], 5);
+      assert.equal(usage.payload['costEstimate'], 0.002);
 
       // io_contracts.outputs(code)从假基座 cat 回读并发布为 CAS 工件(节点 spec.id 命名空间)。
       const resolved = await daemon.rpc('artifacts.resolve', { task: taskId, node: 'n1', name: 'code' });

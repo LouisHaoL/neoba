@@ -4,8 +4,8 @@
  * 分两层:
  * - NodeRuntime:节点内"跑基座"的抽象 —— 引擎不关心容器里跑的是真 CLI 还是
  *   测试桩,只认统一的 RuntimeResult(退出码 + §3.6 统一事件 + 产物);
- * - NodeExecutor / WorkflowEngine:供给 → 基线授予 → 跑 → usage 记账 →
- *   工件发布(CAS 写屏障)→ 销毁;上层按依赖序顺序推进(§3.5a)。
+ * - NodeExecutor / WorkflowEngine:供给 → 基线授予 → 跑 → §3.6 归一事件落账 →
+ *   usage 记账 → 工件发布(CAS 写屏障)→ 销毁;上层按依赖序顺序推进(§3.5a)。
  *
  * 事件全部经注入的 emit 落事件日志(EventLog.append 同构签名),
  * 内存态 = 重放;引擎自身不持持久状态。
