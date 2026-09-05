@@ -172,7 +172,7 @@ export interface EventExpectation {
   readonly principal?: unknown;
 }
 
-export type EventMatchMode = 'subsequence' | 'exact';
+export type EventMatchMode = 'subsequence' | 'exact' | 'set';
 
 function renderExpected(ev: EventExpectation): string {
   let text = ev.type;
@@ -208,7 +208,8 @@ export interface SequenceMatchResult {
 
 /**
  * 事件序列断言。subsequence:期望按序出现在实际事件流中(其间允许实现无关
- * 事件);exact:等长且逐位匹配。失败报告列出期望/实际两侧与逐条匹配情况。
+ * 事件);exact:等长且逐位匹配;set:无序多重集包含(顺序不确定的并行编排)。
+ * 失败报告列出期望/实际两侧与逐条匹配情况。
  */
 export function matchEventSequence(
   expected: readonly EventExpectation[],
@@ -218,7 +219,19 @@ export function matchEventSequence(
   const problems: string[] = [];
   const actualHit: (number | null)[] = actual.map(() => null);
 
-  if (mode === 'exact') {
+  if (mode === 'set') {
+    // 无序多重集包含:每条期望事件独立在实际事件(未被前面期望消费的)中找匹配。
+    const consumed = actual.map(() => false);
+    expected.forEach((want, i) => {
+      const found = actual.findIndex((cand, j) => !consumed[j] && cand !== undefined && eventMatches(want, cand));
+      if (found >= 0) {
+        consumed[found] = true;
+        actualHit[found] = i;
+      } else {
+        problems.push(`set:期望 [${i}] ${renderExpected(want)} 在实际事件中无匹配(或匹配项已被先行期望消费)`);
+      }
+    });
+  } else if (mode === 'exact') {
     if (expected.length !== actual.length) {
       problems.push(`exact 模式:期望 ${expected.length} 条,实际 ${actual.length} 条`);
     }

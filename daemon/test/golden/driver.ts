@@ -59,7 +59,7 @@ type ScenarioStep = {
   readonly name?: string;
   readonly call: string;
   readonly params?: Record<string, unknown>;
-  readonly auth?: 'daemon' | 'none' | 'wrong';
+  readonly auth?: 'daemon' | 'none' | 'wrong' | 'session';
   readonly capture?: Record<string, string>;
   readonly expect?: {
     readonly http?: number;
@@ -81,6 +81,13 @@ type ScenarioStep = {
     readonly verdict: string;
     readonly auto_allowed: boolean;
   };
+} | {
+  readonly op: 'await.task';
+  readonly name?: string;
+  readonly task_id: string;
+  readonly until?: readonly string[];
+  readonly timeout_ms?: number;
+  readonly expect?: unknown;
 };
 
 let scenarioValidate: import('ajv').ValidateFunction<unknown> | null = null;
@@ -152,6 +159,8 @@ export async function runScenarioFile(path: string): Promise<void> {
           if (step.op === 'restart') {
             await handle.stop();
             handle = await startDaemon({ port: 0, stateDir, registry, ...(presets !== undefined ? { presets } : {}) });
+          } else if (step.op === 'await.task') {
+            await runAwaitStep(handle, step, captures, `${scenario.scenario} / ${label}`);
           } else {
             runHardlineCheck(handle, registry, step, `${scenario.scenario} / ${label}`);
           }
@@ -180,16 +189,25 @@ interface RpcResponse {
   readonly body: Record<string, unknown>;
 }
 
+/**
+ * auth 变体:daemon=bootstrap token(admin,缺省)/ none=缺失 / wrong=错值 /
+ * session=此前步骤捕获的会话 token(capture 名固定 SESSION_TOKEN,M3 双 token)。
+ */
 async function callRpc(
   handle: DaemonHandle,
   method: string,
   params: unknown,
-  auth: 'daemon' | 'none' | 'wrong',
+  auth: 'daemon' | 'none' | 'wrong' | 'session',
+  captures?: ReadonlyMap<string, unknown>,
 ): Promise<RpcResponse> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (auth !== 'none') {
-    const token = auth === 'wrong' ? `wrong-${handle.token}` : handle.token;
-    headers['authorization'] = `Bearer ${token}`;
+  if (auth === 'session') {
+    const token = captures?.get('SESSION_TOKEN');
+    headers['authorization'] = `Bearer ${typeof token === 'string' ? token : ''}`;
+  } else if (auth === 'wrong') {
+    headers['authorization'] = `Bearer wrong-${handle.token}`;
+  } else if (auth === 'daemon') {
+    headers['authorization'] = `Bearer ${handle.token}`;
   }
   const res = await fetch(`${handle.baseUrl}/`, {
     method: 'POST',
@@ -207,7 +225,7 @@ async function runRpcStep(
 ): Promise<void> {
   const method = step.call ?? '';
   const params = substitute(step.params ?? {}, captures) as Record<string, unknown>;
-  const res = await callRpc(handle, method, params, step.auth ?? 'daemon');
+  const res = await callRpc(handle, method, params, step.auth ?? 'daemon', captures);
 
   // capture 先取值:同一步骤的 expect 可能自引用本步捕获值(如
   // agent_id = "${TASK}/worker-01");断言失败即抛,暂存值不外泄。
@@ -216,7 +234,9 @@ async function runRpcStep(
     for (const [name, path] of Object.entries(step.capture)) {
       const value = dig(res.body, path);
       if (value === undefined) {
-        throw new Error(`场景断言失败:${label}\n  capture ${name}=${path}: 应答体无此路径`);
+        throw new Error(
+          `场景断言失败:${label}\n  capture ${name}=${path}: 应答体无此路径\n  应答体:${clip(JSON.stringify(res.body))}`,
+        );
       }
       staged.set(name, value);
     }
@@ -276,6 +296,48 @@ function dig(root: unknown, path: string): unknown {
     cur = cur[segment];
   }
   return cur;
+}
+
+// ---------------------------------------------------------------- await 步骤
+
+/**
+ * await.task:轮询 task.status 直至任务到达指定 status(异步编排 workflow.run
+ * 的终态观察);到达后对 result.task 做部分匹配断言,超时即抛。
+ */
+async function runAwaitStep(
+  handle: DaemonHandle,
+  step: Extract<ScenarioStep, { op: 'await.task' }>,
+  captures: Map<string, unknown>,
+  label: string,
+): Promise<void> {
+  const taskId = substitute(step.task_id, captures) as string;
+  const until = step.until ?? ['completed', 'failed', 'cancelled'];
+  const deadline = Date.now() + (step.timeout_ms ?? 10_000);
+  let lastStatus: unknown;
+  for (;;) {
+    const res = await callRpc(handle, 'task.status', { task_id: taskId }, 'daemon');
+    const result = res.body['result'];
+    const task = isRecord(result) ? result['task'] : undefined;
+    lastStatus = isRecord(task) ? task['status'] : undefined;
+    if (typeof lastStatus === 'string' && until.includes(lastStatus)) {
+      if (step.expect !== undefined) {
+        const problems: string[] = [];
+        collectSubsetMismatches(substitute(step.expect, captures), task, 'task', problems);
+        if (problems.length > 0) {
+          throw new Error(
+            `场景断言失败:${label}\n  ` +
+              problems.map((p) => clip(p)).join('\n  ') +
+              `\n  任务记录:${clip(JSON.stringify(task))}`,
+          );
+        }
+      }
+      return;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`场景断言失败:${label}\n  等待终态超时(最后 status=${JSON.stringify(lastStatus)})`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 // ---------------------------------------------------------------- hardline 步骤

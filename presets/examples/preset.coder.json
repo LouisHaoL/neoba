@@ -1,0 +1,23 @@
+{
+  "api": "preset/1.0",
+  "name": "coder/backend",
+  "description": "后端实现者:按 split_plan 修改代码并产出补丁(patch)",
+  "base": "any",
+  "model": {
+    "tier": "standard",
+    "fallback": ["heavy"]
+  },
+  "skills": ["backend-coding"],
+  "idempotent": true,
+  "baseline_grants": [
+    { "cap": "fs:workdir", "scope": "rw" }
+  ],
+  "io_contracts": {
+    "inputs": [{ "name": "split_plan", "type": "file:markdown" }],
+    "outputs": [{ "name": "patch", "type": "file:text" }]
+  },
+  "escalation_policy": {
+    "auto_approve": [],
+    "require_approval": ["*"]
+  }
+}

@@ -7,6 +7,11 @@
  *   neoba doctor [--write] [--json]
  *   neoba prune [--state-dir DIR] [--yes]
  *   neoba mcp   [--state-dir DIR] [--port N]
+ * P2 人机入口(§3.3 / §3.5 / §3.5f):
+ *   neoba task    <id> status|pause|resume|cancel
+ *   neoba budget  <id> status|raise --limit N
+ *   neoba approvals [--all]
+ *   neoba approve <req_id> [--narrow-to PATH] / neoba deny <req_id>
  *
  * 库用法(测试/嵌入式):
  *   const code = await runCli(argv, io, deps);

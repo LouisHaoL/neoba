@@ -15,14 +15,30 @@ export type {
   ArtifactFile,
   ArtifactNamespace,
   ArtifactPayload,
+  RetentionPolicy,
 } from './repository.ts';
 export type {
   ArtifactEntry,
   ArtifactRef,
+  ManifestListing,
   PublishResult,
   ReconcileReport,
   VerifyResult,
 } from './types.ts';
+export {
+  parseRetentionPolicy,
+  retentionFromDiskValue,
+  serializeRetentionPolicy,
+  RETAIN_FOREVER,
+} from './retention.ts';
+export { collectArtifactGc, planArtifactGc, isTerminalStatus } from './gc.ts';
+export type {
+  GcCollectContext,
+  GcCollectResult,
+  GcEventEmitter,
+  GcPlan,
+  GcPlanInput,
+} from './gc.ts';
 export {
   ArtifactError,
   ArtifactNotFound,

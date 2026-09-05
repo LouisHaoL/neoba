@@ -1,4 +1,7 @@
+.gitignore
 node_modules/
 dist/
 *.log
 .neoba/
+neoba-dbg*/
+*.tmp

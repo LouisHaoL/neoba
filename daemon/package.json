@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "neoba daemon 参考实现:供给 + 执行 + 审批执行 + 观测(事实层)",
   "type": "module",
+  "license": "Apache-2.0",
   "bin": { "neoba": "src/cli/main.ts" },
   "engines": { "node": ">=22.6" },
   "scripts": {

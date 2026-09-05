@@ -6,7 +6,10 @@
 export {
   assertNoBypassFlags,
   assertNoBypassSettings,
+  ALL_BYPASS_FLAGS,
+  BYPASS_FLAGS_BY_BASE,
   BYPASS_FLAGS,
+  bypassFlagsFor,
   FORBIDDEN_PERMISSION_MODE,
 } from './bypass.ts';
 export {

@@ -28,7 +28,9 @@ import {
   checkDockerCompose,
   checkDockerDaemon,
   checkDockerSeccompUserns,
+  checkKeyring,
   checkLinuxKernel,
+  checkMicrosandboxCli,
   checkPlatform,
   checkResources,
   checkUserns,
@@ -57,6 +59,7 @@ export { renderReport } from './render.ts';
 export { recommendBackend } from './backend.ts';
 export { collectSystemInfo, execProbe } from './realProbe.ts';
 export { normalizeWindowsOutput } from './checks.ts';
+export { MSB_PROBE_ARGS, checkMicrosandboxCli } from './checks.ts';
 export { classifyDataPlanePath, collectDataPlanePaths } from './dataplane.ts';
 export {
   defaultWslconfigPath,
@@ -144,6 +147,15 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     checks.push(await runCheck(fn, ctx));
   }
 
+  // OS keyring(M6):linux 探测 secret-tool;win/mac 输出 N/A 不算失败。
+  const keyringResult = await runCheck(checkKeyring, ctx);
+  checks.push(keyringResult);
+
+  // microsandbox CLI(M7):可选 Firecracker 后端,linux 探测 msb;
+  // win/mac 输出 N/A 不算失败,也不参与后端判定(docker 仍优先)。
+  const msbResult = await runCheck(checkMicrosandboxCli, ctx);
+  checks.push(msbResult);
+
   // Docker(host 侧,全平台;Windows 上对应 Docker Desktop)
   for (const fn of [checkDockerCli, checkDockerDaemon, checkDockerCompose]) {
     checks.push(await runCheck(fn, ctx));
@@ -195,6 +207,11 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
 
   const decision = recommendBackend(checks, info.platform);
   let reason = decision.reason;
+  // microsandbox 探测联动(M7):可用时在判定理由里提示可选后端;
+  // 缺失时保持原理由(docker 优先的 M6 语义零漂移)。
+  if (info.platform === 'linux' && msbResult.ok) {
+    reason += ';microsandbox CLI 亦可用(可选 Firecracker microVM 后端,经 sandbox.provider=microsandbox 启用)';
+  }
   if (dataPlanePaths.length > 0 && decision.backend !== 'none') {
     reason += dataPlaneReportCross(info.platform, dataPlanePaths)
       ? ';注意:存在跨界数据面路径(error 级),需迁移到 WSL2 原生文件系统'
@@ -208,6 +225,9 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     seccompResult,
     checks,
   );
+  const opencodeReady = computeOpencodeReady(info.platform, checks);
+  // keyring 仅 Linux 可判定;win/mac 为 N/A,不算失败也不算可用。
+  const keyringReady = info.platform === 'linux' && keyringResult.ok;
 
   return {
     schemaVersion: 1,
@@ -223,10 +243,43 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       seccompResult,
       checks,
     ),
+    opencodeReady,
+    opencodeReadyReason: opencodeReady ? null : opencodeNotReadyReason(info.platform, checks),
+    keyringReady,
+    keyringReadyReason: keyringReady
+      ? null
+      : keyringNotReadyReason(info.platform, keyringResult),
+    // microsandbox 仅 Linux 可判定;win/mac 为 N/A,不算失败也不算可用。
+    microsandboxReady: info.platform === 'linux' && msbResult.ok,
+    microsandboxReadyReason: info.platform === 'linux' && msbResult.ok
+      ? null
+      : msbNotReadyReason(info.platform, msbResult),
     dataPlane: dataPlane.entries,
     dataPlaneCrossBoundary: dataPlane.crossBoundary,
     wslconfig: wslconfigInfo,
   };
+}
+
+/** keyringReady=false 的原因;win/mac 给 N/A 说明(不算失败)。 */
+function keyringNotReadyReason(
+  platformName: string,
+  keyring: CheckResult,
+): string {
+  if (platformName !== 'linux') {
+    return `N/A:${platformName} 不使用 libsecret keyring,secret 后端走平台默认(win32=DPAPI,其余=AES 文件)`;
+  }
+  return `secret-tool 不可用: ${keyring.detail}`;
+}
+
+/** microsandboxReady=false 的原因;win/mac 给 N/A 说明(不算失败,可选后端)。 */
+function msbNotReadyReason(
+  platformName: string,
+  msb: CheckResult,
+): string {
+  if (platformName !== 'linux') {
+    return `N/A:${platformName} 不做 microsandbox 探测(Firecracker 后端仅 Linux/KVM),沙箱走平台默认(docker/WSL2)`;
+  }
+  return `microsandbox CLI(msb)不可用: ${msb.detail}`;
 }
 
 function codexNotReadyReason(
@@ -253,6 +306,33 @@ function codexNotReadyReason(
   } else {
     const wslDaemonOk = checks.some((c) => c.id === 'wsl-docker-daemon' && c.ok);
     if (!wslDaemonOk) return 'WSL2 内 docker daemon 不可达,Codex 容器基座无法供给';
+  }
+  return '前置条件未全部满足';
+}
+
+/**
+ * OpenCode 基座前置(§4 P3):无 userns/seccomp 特殊要求,仅要求容器后端
+ * 可达(节点执行仍跑在沙箱容器内);Linux 看 docker-daemon,Windows 看
+ * WSL2 内 docker daemon。
+ */
+function computeOpencodeReady(platformName: string, checks: CheckResult[]): boolean {
+  if (platformName === 'linux') {
+    return checks.some((c) => c.id === 'docker-daemon' && c.ok);
+  }
+  if (platformName === 'win32') {
+    return checks.some((c) => c.id === 'wsl-docker-daemon' && c.ok);
+  }
+  return false;
+}
+
+function opencodeNotReadyReason(platformName: string, checks: CheckResult[]): string {
+  if (platformName !== 'linux' && platformName !== 'win32') {
+    return '非 Linux/Windows 平台,无法判定 OpenCode 基座前置条件';
+  }
+  const daemonOk = checks.some((c) => c.id === 'docker-daemon' && c.ok);
+  const wslDaemonOk = checks.some((c) => c.id === 'wsl-docker-daemon' && c.ok);
+  if (!daemonOk && !wslDaemonOk) {
+    return 'docker daemon 不可达(Linux 直查与 WSL2 内均未命中),OpenCode 容器基座无法供给';
   }
   return '前置条件未全部满足';
 }

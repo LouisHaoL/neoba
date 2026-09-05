@@ -1,0 +1,94 @@
+{
+  "api": "scenario/1.0",
+  "scenario": "08-events-list",
+  "description": "观测线(M4):events.list 读走事件日志(§6 唯一事实源)—— admin 全量并可按 type/task/session 逐层收窄;session 身份锁死绑定 (tenant, session) 命名空间(省略 = 取绑定值,显式异值 → SESSION_FORBIDDEN 403);count 与 limit 的尾部语义一并在参考实现单测覆盖(test/daemon/events-list.test.ts),GET 白名单(dashboard / openapi.json / events/stream)为纯 HTTP 面,不在本场景执行器覆盖范围(test/daemon/dashboard.test.ts)。",
+  "protocol_refs": [
+    "§6 事件溯源(事件日志 = 唯一事实源,查询与审计同一份)",
+    "§3.3 审计日志 = 事件日志,同一份",
+    "§6 鉴权(session 身份按绑定 principal 收窄,M3)"
+  ],
+  "steps": [
+    {
+      "name": "会话握手(acme/dev-1)并捕获会话 token",
+      "call": "session.init",
+      "params": {
+        "protocol": "1.0",
+        "role": "orchestrator",
+        "principal": { "tenant": "acme", "session": "dev-1" },
+        "harness": "golden-harness",
+        "capabilities": {}
+      },
+      "capture": { "SESSION_TOKEN": "result.token" },
+      "expect": {
+        "result": { "session": { "tenant": "acme", "session": "dev-1" } }
+      }
+    },
+    {
+      "name": "admin 在 default 命名空间建任务(对照:他人命名空间)",
+      "call": "task.create",
+      "params": { "intent": "观测对照任务(default)", "preset": "minimal" },
+      "capture": { "TASK_ADMIN": "result.task_id" },
+      "expect": { "result": { "status": "completed" } }
+    },
+    {
+      "name": "session 身份在绑定命名空间建任务",
+      "call": "task.create",
+      "auth": "session",
+      "params": { "intent": "观测任务(acme/dev-1)", "preset": "minimal" },
+      "capture": { "TASK_SESSION": "result.task_id" },
+      "expect": { "result": { "status": "completed" } }
+    },
+    {
+      "name": "admin 全量查询含 daemon 级事件(不按 session 层过滤)",
+      "call": "events.list",
+      "params": { "type": "daemon.started" },
+      "expect": {
+        "result": {
+          "events": { "$contains": [{ "type": "daemon.started", "principal": { "tenant": "default", "session": null } }] }
+        }
+      }
+    },
+    {
+      "name": "admin 按 task + type 收窄:只回该任务的事件",
+      "call": "events.list",
+      "params": { "task": "${TASK_SESSION}", "type": "node.completed" },
+      "expect": {
+        "result": {
+          "events": { "$contains": [{ "type": "node.completed", "principal": { "tenant": "acme", "session": "dev-1", "task": "${TASK_SESSION}" } }] }
+        }
+      }
+    },
+    {
+      "name": "admin 按 session 收窄到 acme/dev-1",
+      "call": "events.list",
+      "params": { "session": "dev-1" },
+      "expect": {
+        "result": {
+          "events": { "$contains": [{ "type": "node.started", "principal": { "tenant": "acme", "session": "dev-1", "task": "${TASK_SESSION}" } }] }
+        }
+      }
+    },
+    {
+      "name": "session 身份省略 params:锁死绑定命名空间(只见本人事件)",
+      "call": "events.list",
+      "auth": "session",
+      "params": {},
+      "expect": {
+        "result": {
+          "events": { "$contains": [{ "type": "node.started", "principal": { "tenant": "acme", "session": "dev-1", "task": "${TASK_SESSION}" } }] }
+        }
+      }
+    },
+    {
+      "name": "session 身份显式异 principal → SESSION_FORBIDDEN(403/-32014)",
+      "call": "events.list",
+      "auth": "session",
+      "params": { "session": "other" },
+      "expect": {
+        "http": 403,
+        "error_code": -32014,
+        "error": { "code": "SESSION_FORBIDDEN", "tenant": "acme", "session": "dev-1" }
+      }
+    }
+  ]
+}

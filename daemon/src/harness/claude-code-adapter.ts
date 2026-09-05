@@ -48,6 +48,7 @@ const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 const MCP_TOOL_RE = /^mcp__([^_]+(?:__[^_]+)*?)__([^_]+)$/;
 
 export class ClaudeCodeAdapter {
+  readonly base = 'claude-code' as const;
   private readonly now: () => Date;
   private readonly agent: string | null;
   private readonly artifactsRoot: string | null;

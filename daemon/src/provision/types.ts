@@ -119,8 +119,14 @@ export interface LogsOptions {
  * - list 只返回本 provider 实例创建的、未销毁的句柄,labels 为子集匹配。
  */
 export interface SandboxProvider {
-  /** 后端标识,如 "docker" / "memory" */
+  /** 后端标识,如 "docker" / "memory" / "microsandbox" */
   readonly backend: string;
+  /**
+   * 是否具备 snapshot/restore 能力(M7 预热池的准入判据,§9 P4):
+   * 缺省(未声明)= 不支持 —— docker/memory 不声明,M7 WarmPool 对其
+   * 直通退化为冷拉;microsandbox(Firecracker microVM)声明 true。
+   */
+  readonly snapshotCapable?: boolean;
   create(spec: SandboxSpec): Promise<SandboxHandle>;
   exec(handle: SandboxHandle, cmd: string[], opts?: ExecOptions): Promise<ExecResult>;
   logs(handle: SandboxHandle, opts?: LogsOptions): Promise<string>;

@@ -41,11 +41,17 @@ export const EVENT_TYPES = [
   'sandbox.started',
   'sandbox.execed',
   'sandbox.destroyed',
+  // 资源池排队(§6 v0.2:并发容器数由 Provisioner 确定性排队,P3 落地)
+  'sandbox.queued',
+  'sandbox.acquired',
+  'sandbox.released',
   // 授权(§3.3,审计 = 事件日志同一份)
   'grant.granted',
   'grant.revoked',
   // 工件(§3.7,发布 = 写屏障完成)
   'artifact.published',
+  // 工件自动 GC(M5,daemon 侧行为:plan/collect 分离,见 artifacts/gc.ts)
+  'artifact.gc',
   // 编排(§3.5,本期只定义结构,引擎未实现)
   'node.started',
   'node.completed',
@@ -113,6 +119,30 @@ export interface SandboxDestroyedPayload extends EventPayloadBase {
   readonly reason: SandboxDestroyReason;
 }
 
+// ---------------------------------------------------------------- 资源池排队(§6)
+
+/** 资源槽事件(§6):排队/占用/释放,acquire 与 release 按 key 成对出现。 */
+export interface SandboxQueuedPayload extends EventPayloadBase {
+  readonly key: string;
+  /** 入队后的等待队列长度。 */
+  readonly waiting: number;
+  readonly limit: number | null;
+}
+
+export interface SandboxAcquiredPayload extends EventPayloadBase {
+  readonly key: string;
+  /** 获得槽位后的占用数。 */
+  readonly inUse: number;
+  readonly limit: number | null;
+}
+
+export interface SandboxReleasedPayload extends EventPayloadBase {
+  readonly key: string;
+  /** 释放后的占用数。 */
+  readonly inUse: number;
+  readonly limit: number | null;
+}
+
 // ---------------------------------------------------------------- 授权(§3.3)
 
 export type DecisionSource = string; // 'auto_rule:{id}' | 'manual:{principal}'
@@ -142,6 +172,27 @@ export interface ArtifactPublishedPayload extends EventPayloadBase {
   readonly sha256: string;
   readonly size: number;
   readonly kind: 'file' | 'tree';
+}
+
+/**
+ * 工件自动 GC 一轮执行的 plan 摘要(M5)。对象删除只清孤儿;
+ * manifest 删除仅限 retention days 到期且任务终态(artifacts/gc.ts)。
+ */
+export interface ArtifactGcPayload extends EventPayloadBase {
+  /** 扫描到的 manifest 指针数(损坏指针不计)。 */
+  readonly scanned: number;
+  /** 扫描到的在盘 CAS 对象数。 */
+  readonly scannedObjects: number;
+  /** in-use 对象数(全部指针可达集)。 */
+  readonly inUseObjects: number;
+  /** 孤儿对象数(本轮将被清扫)。 */
+  readonly orphaned: number;
+  /** 实际删除的 manifest 数(retention 到期且任务终态)。 */
+  readonly removedManifests: number;
+  /** 实际删除的孤儿对象数。 */
+  readonly removedObjects: number;
+  /** 本轮判定到期的 manifest id('{tenant}/{task}/{node}/{name}')。 */
+  readonly expiredManifests?: readonly string[];
 }
 
 // ---------------------------------------------------------------- 编排(§3.5)
@@ -226,9 +277,13 @@ export interface EventPayloads {
   'sandbox.started': SandboxStartedPayload;
   'sandbox.execed': SandboxExecedPayload;
   'sandbox.destroyed': SandboxDestroyedPayload;
+  'sandbox.queued': SandboxQueuedPayload;
+  'sandbox.acquired': SandboxAcquiredPayload;
+  'sandbox.released': SandboxReleasedPayload;
   'grant.granted': GrantGrantedPayload;
   'grant.revoked': GrantRevokedPayload;
   'artifact.published': ArtifactPublishedPayload;
+  'artifact.gc': ArtifactGcPayload;
   'node.started': NodeStartedPayload;
   'node.completed': NodeCompletedPayload;
   'node.failed': NodeFailedPayload;

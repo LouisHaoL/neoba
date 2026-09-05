@@ -17,6 +17,26 @@ export {
   dpapiProtect,
   dpapiUnprotect,
 } from './backends/dpapi.ts';
+export {
+  DEFAULT_KEYRING_TIMEOUT_MS,
+  DEFAULT_SECRET_TOOL,
+  KEYRING_SERVICE,
+  KeyringSecretBackend,
+  defaultSecretToolRunner,
+} from './backends/keyring.ts';
+export type {
+  SecretToolResult,
+  SecretToolRunner,
+} from './backends/keyring.ts';
+export {
+  createSecretBackend,
+  createSecretStore,
+} from './factory.ts';
+export type {
+  ConfiguredSecretBackendKind,
+  SecretStoreFactoryConfig,
+  SecretStoreFactoryEnv,
+} from './factory.ts';
 export { SecretStore } from './store.ts';
 export type { SecretStoreOptions } from './store.ts';
 export { Redactor, redactUnknownValue, secretRefToken } from './redact.ts';
@@ -27,9 +47,11 @@ export {
   InvalidTenant,
   SecretBackendError,
   SecretBackendTimeout,
+  SecretBackendUnavailable,
   SecretCorrupt,
   SecretError,
   SecretNotFound,
+  UnknownSecretBackendKind,
 } from './errors.ts';
 export type {
   SecretBackend,

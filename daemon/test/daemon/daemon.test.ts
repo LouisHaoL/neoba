@@ -376,7 +376,7 @@ describe('恢复(事件重放)与 task.list', () => {
 });
 
 describe('协议层错误与限制', () => {
-  it('非法 JSON → -32700;未知方法 → -32601;GET → 405', async () => {
+  it('非法 JSON → -32700;未知方法 → -32601;未白名单 GET → 405', async () => {
     const handle = await start();
     const bad = await fetch(`${handle.baseUrl}/`, {
       method: 'POST',
@@ -390,7 +390,8 @@ describe('协议层错误与限制', () => {
     assert.equal(unknown.status, 404);
     assert.equal((unknown.body['error'] as Record<string, any>)['code'], -32601);
 
-    const get = await fetch(`${handle.baseUrl}/`, { headers: { 'authorization': `Bearer ${handle.token}` } });
+    // M4 起 GET / 进 dashboard 白名单;未白名单路径保持 405。
+    const get = await fetch(`${handle.baseUrl}/nope`, { headers: { 'authorization': `Bearer ${handle.token}` } });
     assert.equal(get.status, 405);
   });
 

@@ -1,0 +1,263 @@
+/**
+ * WarmPool 测试(M7,§9 P4):
+ * - 池命中(restore 回热)/ 池空冷拉 / 规格签名匹配(异规格不命中);
+ * - release:健康回池(snapshot + destroy)、不健康销毁、池满销毁、
+ *   snapshot 失败降级销毁(清理语义不因池化失败丢失);
+ * - 与 M1 ResourceGate 共用同一信号量:gate 控并发上限,pool 在 gate 之内,
+ *   空闲池条目不占槽;无 gate 时复用 sandbox.acquired/released 事件兜底;
+ * - 不支持 snapshot 的后端(docker/memory)直通退化为冷拉 + 销毁。
+ */
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { ResourceGate } from '../../src/provision/pool.ts';
+import { WarmPool } from '../../src/provision/warm-pool.ts';
+import type { GateEmit } from '../../src/provision/pool.ts';
+import type { SandboxHandle, SandboxProvider, SandboxSpec } from '../../src/provision/index.ts';
+
+/** 记录调用序 + snapshot 能力可开关的 provider 桩。 */
+function fakeProvider(opts: { snapshotCapable?: boolean; snapshotFails?: boolean; unhealthy?: boolean } = {}) {
+  const calls: string[] = [];
+  const restoredRefs: string[] = [];
+  let n = 0;
+  const provider: SandboxProvider & {
+    calls: string[];
+    restoredRefs: string[];
+  } = {
+    calls,
+    restoredRefs,
+    backend: 'fake',
+    ...(opts.snapshotCapable === true ? { snapshotCapable: true } : {}),
+    create: async (spec: SandboxSpec): Promise<SandboxHandle> => {
+      calls.push(`create:${spec.labels?.['neoba.node'] ?? '?'}`);
+      n += 1;
+      return {
+        id: `sbx-${n}`,
+        status: 'running',
+        createdAt: '2026-01-01T00:00:00Z',
+        name: `sbx-${n}`,
+        labels: { ...(spec.labels ?? {}) },
+      };
+    },
+    exec: async () =>
+      opts.unhealthy === true ? { exitCode: 1, stdout: '', stderr: '' } : { exitCode: 0, stdout: '', stderr: '' },
+    logs: async () => '',
+    destroy: async (h: SandboxHandle) => {
+      calls.push(`destroy:${h.id}`);
+    },
+    list: async () => [],
+    snapshot: async (h: SandboxHandle): Promise<string> => {
+      if (opts.snapshotFails === true) throw new Error('snapshot boom');
+      calls.push(`snapshot:${h.id}`);
+      return `snap-${h.id}`;
+    },
+    restore: async (ref: string): Promise<SandboxHandle> => {
+      calls.push(`restore:${ref}`);
+      restoredRefs.push(ref);
+      n += 1;
+      return {
+        id: `sbx-${n}`,
+        status: 'running',
+        createdAt: '2026-01-01T00:00:00Z',
+        name: `sbx-${n}`,
+        labels: { 'neoba.snapshot': ref },
+      };
+    },
+    acquire: async () => {
+      throw new Error('not supported');
+    },
+    release: async () => {
+      throw new Error('not supported');
+    },
+  };
+  return provider;
+}
+
+const SPEC_A: SandboxSpec = { image: 'neoba/sandbox:latest', labels: { 'neoba.task': 't1', 'neoba.node': 'n1' } };
+
+function specOf(node: string): SandboxSpec {
+  return { image: 'neoba/sandbox:latest', labels: { 'neoba.task': 't1', 'neoba.node': node } };
+}
+
+function gateOf(slots: number) {
+  const events: { type: string; payload: Record<string, unknown> }[] = [];
+  const g = new ResourceGate({
+    slots,
+    emit: ((input) => {
+      events.push({ type: input.type, payload: input.payload });
+    }) as GateEmit,
+  });
+  return { g, events };
+}
+
+interface PoolEvent {
+  type: string;
+  payload: Record<string, unknown>;
+}
+
+function poolEmit(): { events: PoolEvent[]; emit: GateEmit } {
+  const events: PoolEvent[] = [];
+  return {
+    events,
+    emit: (input) => {
+      events.push({ type: input.type, payload: input.payload });
+    },
+  };
+}
+
+describe('provision/WarmPool(支持 snapshot 的后端:真池化)', () => {
+  it('池空冷拉;健康回池 = snapshot + destroy;再次 acquire 命中 restore 回热', async () => {
+    const inner = fakeProvider({ snapshotCapable: true });
+    const pool = new WarmPool({ provider: inner });
+
+    const first = await pool.acquire(specOf('n1'));
+    assert.equal(first.fromPool, false);
+    assert.equal(pool.size, 0);
+
+    const verdict = await pool.release(first.handle, { healthy: true });
+    assert.equal(verdict, 'pooled');
+    assert.equal(pool.size, 1);
+    assert.deepEqual(inner.calls, ['create:n1', 'snapshot:sbx-1', 'destroy:sbx-1']);
+
+    const second = await pool.acquire(specOf('n2'));
+    assert.equal(second.fromPool, true);
+    assert.equal(pool.size, 0);
+    assert.deepEqual(inner.restoredRefs, [`snap-sbx-1`]);
+    // 回热实例继承当前节点标签(事件留痕按当前任务记账)
+    assert.equal(second.handle.labels['neoba.node'], 'n2');
+
+    await pool.release(second.handle, { healthy: true });
+    assert.equal(pool.size, 1);
+  });
+
+  it('规格签名:异规格(mounts/env 差异)不命中,各自归池', async () => {
+    const inner = fakeProvider({ snapshotCapable: true });
+    const pool = new WarmPool({ provider: inner });
+    const a = await pool.acquire(specOf('n1'));
+    await pool.release(a.handle, { healthy: true });
+    // 同 image 但挂载不同 → 不允许复用(§4.4 挂载静默错配不可接受)
+    const b = await pool.acquire({
+      ...specOf('n2'),
+      mounts: [{ kind: 'workdir', source: 'w', target: '/workspace', mode: 'rw' }],
+    });
+    assert.equal(b.fromPool, false);
+    assert.equal(pool.size, 1); // a 的条目仍在池内
+    // 同规格再次取用 → 命中
+    const c = await pool.acquire(specOf('n3'));
+    assert.equal(c.fromPool, true);
+  });
+
+  it('不健康(release 探针失败)→ 销毁,不回池', async () => {
+    const inner = fakeProvider({ snapshotCapable: true, unhealthy: true });
+    const pool = new WarmPool({ provider: inner });
+    const h = await pool.acquire(specOf('n1'));
+    const verdict = await pool.release(h.handle); // 未显式 healthy → 缺省探针 exec true
+    assert.equal(verdict, 'destroyed');
+    assert.equal(pool.size, 0);
+    assert.deepEqual(inner.calls, ['create:n1', 'destroy:sbx-1']);
+  });
+
+  it('健康但池满(capacity)→ 销毁;drain 清空条目', async () => {
+    const inner = fakeProvider({ snapshotCapable: true });
+    const pool = new WarmPool({ provider: inner, capacity: 1 });
+    const h1 = await pool.acquire(specOf('n1'));
+    const h2 = await pool.acquire(specOf('n2'));
+    assert.equal(await pool.release(h1.handle, { healthy: true }), 'pooled');
+    assert.equal(await pool.release(h2.handle, { healthy: true }), 'destroyed');
+    assert.equal(pool.size, 1);
+    assert.equal(pool.drain(), 1);
+    assert.equal(pool.size, 0);
+  });
+
+  it('snapshot 失败 → 降级销毁(池化是优化,清理语义不丢)', async () => {
+    const inner = fakeProvider({ snapshotCapable: true, snapshotFails: true });
+    const pool = new WarmPool({ provider: inner });
+    const h = await pool.acquire(specOf('n1'));
+    const verdict = await pool.release(h.handle, { healthy: true });
+    assert.equal(verdict, 'destroyed');
+    assert.equal(pool.size, 0);
+    assert.deepEqual(inner.calls, ['create:n1', 'destroy:sbx-1']);
+  });
+
+  it('与 M1 ResourceGate 共用同一信号量:占槽用满排队,release 后唤醒;空闲池条目不占槽', async () => {
+    const inner = fakeProvider({ snapshotCapable: true });
+    const { g, events } = gateOf(1);
+    const pool = new WarmPool({ provider: inner, gate: g });
+
+    const h1 = await pool.acquire(specOf('n1'));
+    assert.equal(g.inUse, 1);
+    const pending = pool.acquire(specOf('n2')); // 满员 → 排队
+    await new Promise<void>((r) => setImmediate(r));
+    assert.equal(g.waiting, 1);
+
+    await pool.release(h1.handle, { healthy: true });
+    const h2 = await pending;
+    assert.equal(g.inUse, 1);
+    assert.equal(g.waiting, 0);
+    assert.equal(h2.fromPool, true); // 同规格签名(h1 回池条目)→ 命中回热
+    await pool.release(h2.handle, { healthy: true });
+    assert.equal(g.inUse, 0); // 空闲池条目不占槽
+    assert.equal(pool.size, 1);
+
+    // gate 事件(queued/acquired/released)与池条目并存
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['sandbox.acquired', 'sandbox.queued', 'sandbox.released', 'sandbox.acquired', 'sandbox.released'],
+    );
+  });
+
+  it('无 gate:复用 sandbox.acquired/released 事件兜底(payload 带 pool 字段,纯增量)', async () => {
+    const inner = fakeProvider({ snapshotCapable: true });
+    const { events, emit } = poolEmit();
+    const pool = new WarmPool({ provider: inner, emit });
+    const h = await pool.acquire(specOf('n1'));
+    assert.deepEqual(events.map((e) => e.type), ['sandbox.acquired']);
+    await pool.release(h.handle, { healthy: true });
+    assert.deepEqual(events.map((e) => e.type), ['sandbox.acquired', 'sandbox.released']);
+    assert.equal(events[0]!.payload['pool'], true);
+    assert.equal(events[1]!.payload['key'], 't1/n1');
+  });
+
+  it('acquire 冷拉后冷拉实例锚定规格签名(release 能正确归池)', async () => {
+    const inner = fakeProvider({ snapshotCapable: true });
+    const pool = new WarmPool({ provider: inner });
+    const h1 = await pool.acquire(specOf('n1'));
+    assert.ok(h1.handle.labels['neoba.pool-key']);
+    const h2 = await pool.acquire(specOf('n2'));
+    await pool.release(h1.handle, { healthy: true });
+    const h3 = await pool.acquire(specOf('n3'));
+    assert.equal(h3.fromPool, true); // 同规格签名 → 命中 h1 的条目
+    void h2;
+  });
+
+  it('capacity <= 0 拒绝构造', () => {
+    const inner = fakeProvider({ snapshotCapable: true });
+    assert.throws(() => new WarmPool({ provider: inner, capacity: 0 }), /capacity 必须 > 0/);
+  });
+});
+
+describe('provision/WarmPool(不支持 snapshot 的后端:直通退化)', () => {
+  it('docker 类后端:acquire 恒冷拉、release 恒销毁,池层零行为', async () => {
+    const inner = fakeProvider(); // 未声明 snapshotCapable
+    const { g, events } = gateOf(2);
+    const pool = new WarmPool({ provider: inner, gate: g });
+
+    assert.equal(pool.pooling, false);
+    const h1 = await pool.acquire(specOf('n1'));
+    assert.equal(h1.fromPool, false);
+    const verdict = await pool.release(h1.handle, { healthy: true });
+    assert.equal(verdict, 'destroyed');
+    assert.equal(pool.size, 0);
+    assert.deepEqual(inner.calls, ['create:n1', 'destroy:sbx-1']);
+    // gate 语义照常(池不改变闸门行为)
+    assert.deepEqual(events.map((e) => e.type), ['sandbox.acquired', 'sandbox.released']);
+  });
+
+  it('直通退化路径:健康实例也不回池(无 snapshot 介质可固化)', async () => {
+    const inner = fakeProvider();
+    const pool = new WarmPool({ provider: inner });
+    const h = await pool.acquire(specOf('n1'));
+    await pool.release(h.handle); // 健康探针通过也一样销毁
+    assert.deepEqual(inner.calls, ['create:n1', 'destroy:sbx-1']);
+    assert.equal(pool.size, 0);
+  });
+});

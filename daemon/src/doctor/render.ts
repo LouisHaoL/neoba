@@ -45,6 +45,15 @@ export function renderReport(report: DoctorReport): string {
     `Codex 基座前置: ${report.codexReady ? '满足' : `不满足(${report.codexReadyReason ?? '未知原因'})`}`,
   );
   lines.push(
+    `OpenCode 基座前置: ${report.opencodeReady ? '满足' : `不满足(${report.opencodeReadyReason ?? '未知原因'})`}`,
+  );
+  lines.push(
+    `Secrets keyring: ${report.keyringReady ? '可用(libsecret secret-tool)' : `不可用/不适用(${report.keyringReadyReason ?? '未知原因'})`}`,
+  );
+  lines.push(
+    `Microsandbox: ${report.microsandboxReady ? '可用(msb CLI,可选 Firecracker 后端)' : `不可用/不适用(${report.microsandboxReadyReason ?? '未知原因'})`}`,
+  );
+  lines.push(
     `数据面: ${report.dataPlane.length === 0
       ? '未配置路径'
       : report.dataPlaneCrossBoundary

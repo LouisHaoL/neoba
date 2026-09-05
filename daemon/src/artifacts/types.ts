@@ -1,6 +1,11 @@
 /**
  * 工件仓库的对外类型(CAS 语义,§3.7 v0.2)。
+ *
+ * retention 语义(daemon 侧定型,M5):RetentionPolicy 见 retention.ts;
+ * ArtifactRef.retention 为 null = 旧数据未声明,按 forever 处理。
  */
+export type { RetentionPolicy } from './retention.ts';
+import type { RetentionPolicy } from './retention.ts';
 
 /** 四层命名空间的前两层(§10.4:tenant → session → task → agent,
  *  P1–P2 单 tenant 单 session,session 层暂并入 task 路径不单列)。 */
@@ -51,14 +56,16 @@ export interface ArtifactRef {
   readonly size: number;
   readonly entries: readonly ArtifactEntry[];
   readonly publishedAt: string;
-  /** GC 预留字段位(v0.2 只占位,自动 GC 为 P2+ 工作项)。 */
-  readonly retention: string | null;
+  /** 保留策略;null = 未声明,按 forever 处理(M5 起由 GC 消费)。 */
+  readonly retention: RetentionPolicy | null;
 }
 
 export interface PublishResult {
   readonly version: number;
   readonly rootSha256: string;
   readonly size: number;
+  /** retention 非法被降级为 forever 时的告警文案(合法时缺省)。 */
+  readonly retentionWarnings?: readonly string[];
 }
 
 export interface VerifyResult {
@@ -67,6 +74,25 @@ export interface VerifyResult {
   /** 通过校验的条目数。 */
   readonly entries: number;
   readonly size: number;
+}
+
+/**
+ * manifest 指针的扫描快照(GC 的 plan 输入):当前盘上可解析的全部指针。
+ * 损坏指针不在列(由 listManifests 跳过,读路径容错)。
+ */
+export interface ManifestListing {
+  /** 指针标识:'{tenant}/{task}/{node}/{name}'(deleteManifest 的入参)。 */
+  readonly id: string;
+  readonly tenant: string;
+  readonly task: string;
+  readonly node: string;
+  readonly name: string;
+  readonly version: number;
+  readonly publishedAt: string;
+  /** 保留策略(落盘值已解析;null = 未声明,按 forever 处理)。 */
+  readonly retention: RetentionPolicy | null;
+  /** 该指针当前引用的全部 CAS 对象 sha。 */
+  readonly objects: readonly string[];
 }
 
 /** reconcile() 对账报告:CAS 目录重建/审计的结果。 */

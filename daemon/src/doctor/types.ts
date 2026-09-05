@@ -85,6 +85,20 @@ export interface DoctorReport {
   codexReady: boolean;
   /** codexReady=false 时的原因;true 时为 null。 */
   codexReadyReason: string | null;
+  /** OpenCode 基座前置是否满足(无 userns 要求,仅容器后端可达,P3)。 */
+  opencodeReady: boolean;
+  /** opencodeReady=false 时的原因;true 时为 null。 */
+  opencodeReadyReason: string | null;
+  /** OS keyring(libsecret secret-tool)是否可用,M6;仅 Linux 可判定,
+   * win/mac 为 N/A(不阻塞,secret 后端走平台默认)。 */
+  keyringReady: boolean;
+  /** keyringReady=false 时的原因(含"N/A:平台不适用");true 时为 null。 */
+  keyringReadyReason: string | null;
+  /** microsandbox CLI(msb,Firecracker microVM 后端)是否可用,M7;
+   * 仅 Linux 可判定(KVM 前置),win/mac 为 N/A(不阻塞,可选后端)。 */
+  microsandboxReady: boolean;
+  /** microsandboxReady=false 时的原因(含"N/A:平台不适用");true 时为 null。 */
+  microsandboxReadyReason: string | null;
   /** 数据面路径跨界检测结果(可能为空数组 = 未配置数据面路径)。 */
   dataPlane: DataPlanePathCheck[];
   /** 数据面是否存在跨界路径(error 级)。 */

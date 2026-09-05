@@ -31,7 +31,7 @@ export interface CommandContext {
   readonly deps: CliDeps;
 }
 
-/** prune 命令用到的工件仓库最小接口(只读对账 + GC),便于测试用假仓库。 */
+/** prune 命令用到的工件仓库最小接口(只读对账 + GC + M5 自动 GC 计划),便于测试用假仓库。 */
 export interface CasRepoLike {
   reconcile(): Promise<{
     manifests: number;
@@ -41,6 +41,9 @@ export interface CasRepoLike {
     unreferenced: string[];
   }>;
   prune(): Promise<string[]>;
+  /** 自动 GC 计划输入(M5 --plan 用):指针快照与在盘对象清单。 */
+  listManifests?(): Promise<import('../artifacts/types.ts').ManifestListing[]>;
+  listObjects?(): Promise<string[]>;
   close(): Promise<void>;
 }
 

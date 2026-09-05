@@ -98,3 +98,35 @@ export class PresetUnknown extends RpcError {
     this.preset = preset;
   }
 }
+
+/** session token 身份试图访问绑定 (tenant, session) 之外的 principal。 */
+export class SessionForbidden extends RpcError {
+  readonly tenant: string;
+  readonly session: string;
+
+  constructor(tenant: string, session: string) {
+    super(-32014, `会话 token 越权:绑定 ${tenant}/${session},不得访问其它 principal`, {
+      data: { code: 'SESSION_FORBIDDEN', tenant, session },
+      httpStatus: 403,
+    });
+    this.tenant = tenant;
+    this.session = session;
+  }
+}
+
+/** session token 身份试图定案不属于本会话任务的审批单。 */
+export class ApprovalForbidden extends RpcError {
+  readonly reqId: string;
+  readonly tenant: string;
+  readonly session: string;
+
+  constructor(reqId: string, tenant: string, session: string) {
+    super(-32016, `审批越权:审批单 ${reqId} 不属于会话 ${tenant}/${session} 的任务`, {
+      data: { code: 'APPROVAL_FORBIDDEN', req_id: reqId, tenant, session },
+      httpStatus: 403,
+    });
+    this.reqId = reqId;
+    this.tenant = tenant;
+    this.session = session;
+  }
+}

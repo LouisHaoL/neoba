@@ -6,6 +6,8 @@ export type SandboxErrorCode =
   | "invalid_state" // 句柄状态不允许该操作(如对 stopped/removed exec)
   | "prerequisite_not_met" // 基座前置条件不可满足(§5 v0.2:显式拒绝,不静默降级)
   | "invalid_spec" // SandboxSpec 违反硬规则(如 secret/config 挂载试图 rw)
+  | "provider_unknown" // 配置声明的后端名不在注册表(M7 factory:显式拒绝,不降级)
+  | "output_parse_failed" // 后端 CLI 输出形状不符合预期(M7:类型化解析错误,不炸流)
   | "not_supported"; // 能力未实现(snapshot/restore、网络 allowlist、资源池排队)
 
 export class SandboxError extends Error {
@@ -63,5 +65,35 @@ export class NotSupportedError extends SandboxError {
   constructor(message: string) {
     super("not_supported", message);
     this.name = "NotSupportedError";
+  }
+}
+
+/** 配置声明的沙箱后端名不在注册表(M7 factory;显式拒绝,不静默降级)。 */
+export class ProviderUnknownError extends SandboxError {
+  /** 配置里的原始后端名。 */
+  readonly requested: string;
+  /** 注册表里可用的后端名(给排错提示)。 */
+  readonly known: readonly string[];
+
+  constructor(requested: string, known: readonly string[]) {
+    super(
+      "provider_unknown",
+      `未知沙箱后端 "${requested}"(已知:${known.join(", ")})` +
+        ";请检查 neoba.config.json 的 sandbox.provider,不要静默降级",
+    );
+    this.name = "ProviderUnknownError";
+    this.requested = requested;
+    this.known = known;
+  }
+}
+
+/**
+ * 后端 CLI 输出形状不符合预期(M7,参考 harness adapter 的 parse_error 思路:
+ * 上层按 code 分支,不解析错误文案,更不因坏输出抛 TypeError 炸流程)。
+ */
+export class CliOutputParseError extends SandboxError {
+  constructor(message: string) {
+    super("output_parse_failed", message);
+    this.name = "CliOutputParseError";
   }
 }

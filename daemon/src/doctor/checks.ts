@@ -392,6 +392,72 @@ export async function checkDockerSeccompUserns(
 }
 
 // ---------------------------------------------------------------------------
+// OS keyring(libsecret secret-tool,M6,凭据后端前置)
+// ---------------------------------------------------------------------------
+
+/** doctor 的 keyring 探测参数(与 KeyringSecretBackend 的 lookup 属性一致)。 */
+export const KEYRING_PROBE_ARGS = ['lookup', 'service', 'neoba'] as const;
+
+export async function checkKeyring(ctx: CheckContext): Promise<CheckResult> {
+  const platformName = ctx.info.platform;
+  // secret-tool 是 Linux(libsecret)专属;win/mac 走各自默认后端
+  // (DPAPI / File+AES),N/A 不算失败(unknown 既非 ok 也非 fail)。
+  if (platformName !== 'linux') {
+    return make(
+      'keyring',
+      'unknown',
+      `N/A:${platformName} 不使用 libsecret keyring,secret 后端走平台默认`,
+    );
+  }
+  // 探测只做一次 lookup(无副作用,不写 keyring):secret-tool 存在且
+  // keyring 服务应答即为可用 —— 退出码 0(有匹配)/ 1(无匹配)都算。
+  const r = await ctx.probe('secret-tool', [...KEYRING_PROBE_ARGS]);
+  if (r.code === 0 || r.code === 1) {
+    return make('keyring', 'ok', 'secret-tool(libsecret)可用,keyring 后端可接线');
+  }
+  const reason = firstLine(r.stderr) !== '' ? firstLine(r.stderr) : `退出码 ${r.code}`;
+  return make(
+    'keyring',
+    'fail',
+    `secret-tool 不可用:${reason}`,
+    '安装 libsecret 工具(Debian/Ubuntu: apt install libsecret-1-0 libsecret-tools;RHEL: dnf install libsecret),并确认 gnome-keyring 等秘钥环服务在运行',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// microsandbox CLI(Firecracker microVM 后端,M7,可选沙箱后端前置)
+// ---------------------------------------------------------------------------
+
+/** doctor 的 msb 探测参数(与 MicrosandboxProvider 的 CLI 同一可执行名)。 */
+export const MSB_PROBE_ARGS = ['--version'] as const;
+
+export async function checkMicrosandboxCli(ctx: CheckContext): Promise<CheckResult> {
+  const platformName = ctx.info.platform;
+  // Firecracker/KVM 是 Linux 专属;win/mac 为 N/A 不算失败(可选后端,
+  // Windows 侧 microsandbox 走 WHP,不在 doctor v1 检测范围)。
+  if (platformName !== 'linux') {
+    return make(
+      'msb-cli',
+      'unknown',
+      `N/A:${platformName} 不做 microsandbox 探测(Firecracker 后端仅 Linux/KVM)`,
+    );
+  }
+  const r = await ctx.probe('msb', [...MSB_PROBE_ARGS]);
+  if (r.code === 0) {
+    const m = /msb ([^\s,]+)/i.exec(r.stdout) ?? /([0-9]+\.[^\s,]+)/.exec(r.stdout);
+    const version = m?.[1] ?? firstLine(r.stdout);
+    return make('msb-cli', 'ok', `microsandbox CLI 可用,版本 ${version}`);
+  }
+  const reason = firstLine(r.stderr) !== '' ? firstLine(r.stderr) : `退出码 ${r.code}`;
+  return make(
+    'msb-cli',
+    'fail',
+    `microsandbox CLI(msb)不可用:${reason}`,
+    '可选后端,不影响 docker;如需 Firecracker microVM 后端,安装 microsandbox(curl -fsSL https://install.microsandbox.dev | sh)并确认 KVM 可用(/dev/kvm)',
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 数据面路径跨界检测(v0.2 §10.6,error 级)
 // ---------------------------------------------------------------------------
 

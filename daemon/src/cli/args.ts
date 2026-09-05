@@ -78,6 +78,20 @@ export function flagInt(flags: Record<string, FlagValue>, key: string): number |
   return n;
 }
 
+/** 取非负整数选项(无端口上限,预算 token 数等大数值用)。 */
+export function flagCount(flags: Record<string, FlagValue>, key: string): number | undefined {
+  const v = flags[key];
+  if (v === undefined) return undefined;
+  if (typeof v !== 'string') {
+    throw new CliUsageError(`选项 --${key} 需要一个数值`);
+  }
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new CliUsageError(`选项 --${key} 必须是非负整数: ${v}`);
+  }
+  return n;
+}
+
 export function flagBool(flags: Record<string, FlagValue>, key: string): boolean {
   return flags[key] !== undefined;
 }

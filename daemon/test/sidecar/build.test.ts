@@ -18,9 +18,12 @@ import {
   assertNoBypassFlags,
   assertNoBypassSettings,
   assertNoSecretPlaintext,
+  ALL_BYPASS_FLAGS,
+  bypassFlagsFor,
   buildSandboxConfig,
   defaultSecretEnvName,
   materializeSecretEnv,
+  BYPASS_FLAGS_BY_BASE,
 } from '../../src/sidecar/index.ts';
 import type { McpCatalog, SidecarPlan } from '../../src/sidecar/index.ts';
 
@@ -171,6 +174,52 @@ describe('spawn 硬规则(§4.4):bypass 类标志必炸', () => {
     assert.doesNotThrow(() => assertNoBypassFlags(plan.harnessSpawn.argv));
     assert.doesNotThrow(() => assertNoBypassSettings(plan.files[0]?.content ?? ''));
     assert.ok(plan.files[0]?.content.includes('"defaultMode":"acceptEdits"'));
+  });
+});
+
+describe('bypass 标志按基座分域(§4.4,P3 多基座)', () => {
+  it('分表:claude-code / codex / opencode 各自的击穿开关;并集 = 全集', () => {
+    assert.deepEqual(bypassFlagsFor('claude-code'), ['--dangerously-skip-permissions', '--yolo']);
+    assert.deepEqual(bypassFlagsFor('codex'), ['--dangerously-bypass-approvals-and-sandbox', '--yolo']);
+    assert.deepEqual(bypassFlagsFor('opencode'), []);
+    assert.deepEqual([...BYPASS_FLAGS_BY_BASE['codex'] ?? []], bypassFlagsFor('codex'));
+    // 并集不重复(--yolo 多表共有)
+    assert.equal(ALL_BYPASS_FLAGS.length, new Set(ALL_BYPASS_FLAGS).size);
+    assert.ok(ALL_BYPASS_FLAGS.includes('--dangerously-bypass-approvals-and-sandbox'));
+  });
+
+  it('按 base 校验:codex 的标志在 base=codex 下必拦;claude 专属标志在 base=codex 下不拦', () => {
+    // codex 域内标志命中
+    assert.throws(
+      () => assertNoBypassFlags(['codex', 'exec', '--dangerously-bypass-approvals-and-sandbox'], 'codex'),
+      BypassFlagDetected,
+    );
+    // 分域语义:claude 专属标志不在 codex 域内 → 不拦(表驱动,宁缺勿滥)
+    assert.doesNotThrow(() =>
+      assertNoBypassFlags(['codex', 'exec', '--dangerously-skip-permissions'], 'codex'),
+    );
+    // 单参调用(缺省)走全集并集:两个基座的标志都不放过
+    assert.throws(
+      () => assertNoBypassFlags(['codex', 'exec', '--dangerously-bypass-approvals-and-sandbox']),
+      BypassFlagDetected,
+    );
+    assert.throws(
+      () => assertNoBypassFlags(['claude', '--dangerously-skip-permissions']),
+      BypassFlagDetected,
+    );
+  });
+
+  it('未知 base 取全集并集(宁枉勿纵);--permission-mode 校验与 base 无关', () => {
+    assert.deepEqual(bypassFlagsFor('mystery-base'), ALL_BYPASS_FLAGS);
+    assert.deepEqual(bypassFlagsFor(), ALL_BYPASS_FLAGS);
+    assert.throws(
+      () => assertNoBypassFlags(['x', '--permission-mode', 'bypassPermissions'], 'opencode'),
+      BypassFlagDetected,
+    );
+    assert.throws(
+      () => assertNoBypassFlags(['x', '--permission-mode=bypassPermissions'], 'codex'),
+      BypassFlagDetected,
+    );
   });
 });
 

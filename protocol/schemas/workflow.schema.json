@@ -82,6 +82,11 @@
           "type": "array",
           "description": "契约式边绑定:输入来自上游节点的工件(节点间交互只通过交付文件,§3.7)",
           "items": { "$ref": "#/$defs/inputBinding" }
+        },
+        "parallel": {
+          "type": "boolean",
+          "default": false,
+          "description": "并行语义(§3.5 P3 起实现;字段按 §3.0 增量规则后补,语义自设计文档 v0.3 冻结):true = 允许与同批就绪(依赖已满足)的其他 parallel 节点并发启动;false(缺省)= 严格串行派发。parallel 节点与串行节点的先后由依赖图决定,无组命名、无跨节点 barrier"
         }
       },
       "additionalProperties": false

@@ -11,19 +11,42 @@ import { BypassFlagDetected, SidecarConfigInvalid } from './errors.ts';
 /** 已知 bypass 类 CLI 标志(匹配语义:整串或作为子串出现即命中)。 */
 export const BYPASS_FLAGS: readonly string[] = ['--dangerously-skip-permissions', '--yolo'];
 
+/**
+ * 按基座分域的 bypass 类标志(§4.4,P3 多基座):各基座 CLI 的
+ * "整体击穿权限/沙箱"开关不同,分表维护;未知基座取全集并集(宁枉勿纵)。
+ */
+export const BYPASS_FLAGS_BY_BASE: Readonly<Record<string, readonly string[]>> = {
+  'claude-code': ['--dangerously-skip-permissions', '--yolo'],
+  codex: ['--dangerously-bypass-approvals-and-sandbox', '--yolo'],
+  opencode: [],
+};
+
+/** 全集并集(缺省校验口径:base 未知 / 未指定时,任何基座的标志都不放过)。 */
+export const ALL_BYPASS_FLAGS: readonly string[] = [
+  ...new Set(Object.values(BYPASS_FLAGS_BY_BASE).flat()),
+];
+
+/** 某 base(缺省 = 全集并集,兼容单参调用)应拦截的 bypass 标志集。 */
+export function bypassFlagsFor(base?: string): readonly string[] {
+  if (base === undefined) return ALL_BYPASS_FLAGS;
+  return BYPASS_FLAGS_BY_BASE[base] ?? ALL_BYPASS_FLAGS;
+}
+
 /** 基座权限模式中被禁的取值(§1.3:该层可被击穿,更不允许主动开启)。 */
 export const FORBIDDEN_PERMISSION_MODE = 'bypasspermissions';
 
 /**
  * 校验启动命令行argv:出现 bypass 标志(含 --permission-mode
  * bypassPermissions 两种写法)→ BypassFlagDetected。
+ * base 给出时按该基座的标志表校验;缺省按全集并集(兼容现有单参调用)。
  */
-export function assertNoBypassFlags(argv: readonly string[]): void {
+export function assertNoBypassFlags(argv: readonly string[], base?: string): void {
+  const flags = bypassFlagsFor(base);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (token === undefined) continue;
     const lower = token.toLowerCase();
-    for (const flag of BYPASS_FLAGS) {
+    for (const flag of flags) {
       if (lower.includes(flag)) {
         throw new BypassFlagDetected(token, `argv[${i}]`);
       }

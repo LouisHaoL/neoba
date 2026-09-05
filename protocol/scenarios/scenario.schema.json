@@ -58,7 +58,8 @@
       "oneOf": [
         { "$ref": "#/$defs/rpcStep" },
         { "$ref": "#/$defs/restartStep" },
-        { "$ref": "#/$defs/hardlineStep" }
+        { "$ref": "#/$defs/hardlineStep" },
+        { "$ref": "#/$defs/awaitStep" }
       ]
     },
     "rpcStep": {
@@ -70,8 +71,8 @@
         "call": { "type": "string", "minLength": 1, "description": "JSON-RPC 方法名,如 session.init / task.create" },
         "params": { "type": "object", "description": "调用参数;字符串中的 ${VAR} 引用此前步骤 capture 的值" },
         "auth": {
-          "enum": ["daemon", "none", "wrong"],
-          "description": "Bearer token 携带方式:daemon=正确 token(缺省)、none=缺失、wrong=错误(§6 鉴权断言用)"
+          "enum": ["daemon", "none", "wrong", "session"],
+          "description": "Bearer token 携带方式:daemon=bootstrap token(admin,缺省)、none=缺失、wrong=错误(§6 鉴权断言用)、session=此前步骤捕获的会话 token(capture 变量 SESSION_TOKEN,§6 M3 双 token 模型)"
         },
         "capture": {
           "type": "object",
@@ -107,6 +108,24 @@
       },
       "description": "停掉 daemon 并用同一状态目录重启(§6 事件溯源恢复);token 随重启更换"
     },
+    "awaitStep": {
+      "type": "object",
+      "required": ["op", "task_id", "expect"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "const": "await.task" },
+        "name": { "type": "string" },
+        "task_id": { "type": "string", "description": "等待的任务 id,支持 ${VAR}" },
+        "until": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "视为到达的 status 集合;缺省 [completed, failed, cancelled]"
+        },
+        "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 30000, "description": "等待超时,缺省 10000" },
+        "expect": { "description": "到达后对 task.status 应答 result.task 的部分匹配规范(同 rpcExpect.result)" }
+      },
+      "description": "轮询 task.status 直至任务到达指定 status(异步编排 workflow.run 的终态观察)"
+    },
     "hardlineStep": {
       "type": "object",
       "required": ["op", "cap", "scope", "expect"],
@@ -136,8 +155,8 @@
       "additionalProperties": false,
       "properties": {
         "match": {
-          "enum": ["subsequence", "exact"],
-          "description": "subsequence(缺省):期望序列按序出现在实际事件流中,允许其间夹实现无关事件;exact:逐条按位且等长"
+          "enum": ["subsequence", "exact", "set"],
+          "description": "subsequence(缺省):期望序列按序出现在实际事件流中,允许其间夹实现无关事件;exact:逐条按位且等长;set:无序多重集包含(每条期望事件独立找匹配、不重复消费,额外事件允许)—— 并行编排等顺序不确定场景用"
         },
         "scope": {
           "type": "object",

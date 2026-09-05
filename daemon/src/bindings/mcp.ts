@@ -42,6 +42,8 @@ export interface McpBridgeOptions {
   readonly supportedVersions?: readonly string[];
   /** initialize 后自动 session.init(默认 true)。 */
   readonly autoSession?: boolean;
+  /** auto-session / session_init 的缺省 tenant;缺省 'default'。 */
+  readonly tenant?: string;
   /** 注入随机源(测试);缺省 crypto.randomBytes。 */
   readonly random?: () => string;
 }
@@ -190,6 +192,127 @@ const TOOLS: readonly McpToolDef[] = [
     },
     needsSession: false,
   },
+  // ---- P2 操作面(桥工具全集补齐,§6 daemon localhost API 对齐) ----
+  {
+    name: 'workflow_run',
+    description:
+      '提交 WorkflowSpec 多节点编排(异步):立即返回 task_id,终态经 task_status / 事件流观察。',
+    inputSchema: {
+      type: 'object',
+      required: ['workflow'],
+      properties: {
+        workflow: { type: 'object', description: 'WorkflowSpec 文档(workflow/1.0)' },
+        intent: { type: 'object', description: 'IntentDoc(intent/1.0,可选)' },
+        budget: {
+          type: 'object',
+          description: '预算约束 {limit_tokens, soft_ratio?}(可选)',
+          properties: { limit_tokens: { type: 'integer' }, soft_ratio: { type: 'number' } },
+        },
+        secret_ids: { type: 'array', items: { type: 'string' }, description: '注入的 secret id 清单' },
+        tenant: { type: 'string' },
+        session: { type: 'string' },
+      },
+    },
+    needsSession: true,
+  },
+  {
+    name: 'task_pause',
+    description: '暂停运行中的编排任务(停在派发边界)。',
+    inputSchema: {
+      type: 'object',
+      required: ['task_id'],
+      properties: { task_id: { type: 'string' } },
+    },
+    needsSession: false,
+  },
+  {
+    name: 'task_resume',
+    description: '恢复暂停/等待中的任务。',
+    inputSchema: {
+      type: 'object',
+      required: ['task_id'],
+      properties: { task_id: { type: 'string' } },
+    },
+    needsSession: false,
+  },
+  {
+    name: 'task_cancel',
+    description: '取消任务(在飞节点协作终止)。',
+    inputSchema: {
+      type: 'object',
+      required: ['task_id'],
+      properties: { task_id: { type: 'string' } },
+    },
+    needsSession: false,
+  },
+  {
+    name: 'approvals_list',
+    description: '列出审批单(status=pending/all,缺省 all)。',
+    inputSchema: {
+      type: 'object',
+      properties: { status: { type: 'string', enum: ['pending', 'all'] } },
+    },
+    needsSession: false,
+  },
+  {
+    name: 'approvals_decide',
+    description: '定案审批单(granted/denied);admin 可带 by,窄化用 narrowed_to。',
+    inputSchema: {
+      type: 'object',
+      required: ['req_id', 'decision'],
+      properties: {
+        req_id: { type: 'string' },
+        decision: { type: 'string', enum: ['granted', 'denied'] },
+        by: { type: 'string', description: '定案人(admin 身份;session 身份强制记为会话)' },
+        narrowed_to: { type: 'string', description: '授予窄化目标' },
+      },
+    },
+    needsSession: false,
+  },
+  {
+    name: 'budget_status',
+    description: '查任务预算水位(limit/soft/observed/level)。',
+    inputSchema: {
+      type: 'object',
+      required: ['task_id'],
+      properties: { task_id: { type: 'string' } },
+    },
+    needsSession: false,
+  },
+  {
+    name: 'budget_raise',
+    description: '抬预算上限(熔断后续预算,配合 task_resume)。',
+    inputSchema: {
+      type: 'object',
+      required: ['task_id', 'limit_tokens'],
+      properties: { task_id: { type: 'string' }, limit_tokens: { type: 'integer' } },
+    },
+    needsSession: false,
+  },
+  {
+    name: 'models_list',
+    description: '列出 Model Score Registry(分层评分观测)。',
+    inputSchema: { type: 'object', properties: {} },
+    needsSession: false,
+  },
+  {
+    name: 'models_feedback',
+    description: '反馈模型表现(EMA 更新分层评分;§3.9)。',
+    inputSchema: {
+      type: 'object',
+      required: ['model', 'tier', 'success'],
+      properties: {
+        model: { type: 'string' },
+        tier: { type: 'string', enum: ['fast', 'standard', 'heavy'] },
+        success: { type: 'boolean' },
+        quality: { type: 'number', description: '[0,1]' },
+        task_type: { type: 'string' },
+        budget_tier: { type: 'string' },
+        traversals: { type: 'integer' },
+      },
+    },
+    needsSession: false,
+  },
 ];
 
 const TOOL_BY_NAME = new Map<string, McpToolDef>(TOOLS.map((tool) => [tool.name, tool]));
@@ -273,7 +396,7 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
 
   /** 自动握手 + 会话身份缓存;失败不抛(显式 session_init 可重试)。 */
   function startAutoSession(): Promise<void> {
-    const tenant = 'default';
+    const tenant = options.tenant ?? 'default';
     const session = `mcp-${random()}`;
     return options
       .callDaemon('session.init', {
@@ -309,7 +432,7 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
   }
 
   async function doExplicitSessionInit(args: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const tenant = typeof args['tenant'] === 'string' ? args['tenant'] : 'default';
+    const tenant = typeof args['tenant'] === 'string' ? args['tenant'] : options.tenant ?? 'default';
     const session =
       typeof args['session'] === 'string' ? args['session'] : `mcp-${random()}`;
     const request = {

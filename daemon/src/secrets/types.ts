@@ -57,8 +57,8 @@ export interface SecretManifestEntry {
 /** 存储后端抽象(§3.8:OS keyring 起步;§11 参考实现)。
  * 后端只认 (tenant, id) 二元组,值在 get 时出接口;set/list 均不回传值。 */
 export interface SecretBackend {
-  /** 后端类别标识(观测 / doctor 用)。 */
-  readonly kind: 'memory' | 'file';
+  /** 后端类别标识(观测 / doctor / 工厂判定用)。 */
+  readonly kind: 'memory' | 'file' | 'keyring';
 
   /** 写入或更新。返回更新后的元数据。 */
   set(

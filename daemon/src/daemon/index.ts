@@ -7,10 +7,23 @@ export { startDaemon, stopDaemon, defaultPresets, DAEMON_VERSION } from './daemo
 export type { DaemonOptions, DaemonHandle } from './daemon.ts';
 export { DEFAULT_PORT, DEFAULT_HOST, DEFAULT_MAX_BODY_BYTES, startHttpBinding, stopHttpBinding } from './http.ts';
 export type { HttpBindingOptions, OperationHandler } from './http.ts';
-export { Operations, DEFAULT_TENANT, makeGrantSink } from './operations.ts';
-export { replayTasks, TaskStore } from './tasks.ts';
+export { Operations, DEFAULT_TENANT, OPERATIONS, makeGrantSink } from './operations.ts';
+export { API_OPERATIONS, OPENAPI_VERSION, openapiDocument } from './api-doc.ts';
+export type { OperationDoc, OperationParamDoc } from './api-doc.ts';
+export { DASHBOARD_HTML } from './dashboard/index.ts';
+export { replayTasks, TaskStore, applyTaskEvent } from './tasks.ts';
 export type { TaskRecord, TaskStatus } from './tasks.ts';
+export {
+  ModelRegistryStore,
+  makeApprovalEmit,
+  makeBudgetEmit,
+  makeEngineEmit,
+  principalFromAgentId,
+  sandboxReconciler,
+} from './wiring.ts';
 export { generateToken, readTokenFile, writeTokenFile, tokensMatch, TOKEN_FILE_NAME } from './token.ts';
+export { ADMIN_IDENTITY, resolveIdentity, TokenRegistry } from './identity.ts';
+export type { RequestIdentity } from './identity.ts';
 export {
   RPC,
   RpcError,
@@ -20,6 +33,8 @@ export {
   TaskNotFound,
   SessionUnknown,
   PresetUnknown,
+  SessionForbidden,
+  ApprovalForbidden,
 } from './errors.ts';
 export {
   parseJsonRpcRequest,

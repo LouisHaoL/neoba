@@ -107,3 +107,27 @@ export class SecretBackendTimeout extends SecretBackendError {
     this.timeoutMs = timeoutMs;
   }
 }
+
+/** 后端在当前环境不可用(依赖的 OS 工具缺失 / 子进程起不来)。
+ * 归类为后端故障的子类(错误传播路径通用),但单独类型化:这是
+ * "环境没有这个后端",调用方(如工厂、doctor)应显式处理或失败,
+ * **不允许静默降级**到弱后端(§3.8)。 */
+export class SecretBackendUnavailable extends SecretBackendError {
+  constructor(detail: string) {
+    super(detail, 'SECRET_BACKEND_UNAVAILABLE');
+    this.name = 'SecretBackendUnavailable';
+  }
+}
+
+/** 配置声明了未知 secret 后端 kind(工厂 / 生产接线用,不静默降级)。 */
+export class UnknownSecretBackendKind extends SecretError {
+  readonly kind: string;
+
+  constructor(kind: string, known: readonly string[]) {
+    super(
+      'SECRET_BACKEND_UNKNOWN_KIND',
+      `未知 secret 后端 kind: ${JSON.stringify(kind)}(可选: ${known.join(', ')})`,
+    );
+    this.kind = kind;
+  }
+}

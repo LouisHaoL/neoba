@@ -8,7 +8,8 @@
       "preset": "coder/backend",
       "inputs": [{ "from": "plan.outputs.split_plan" }],
       "timeout": 3600,
-      "retry": { "max": 1, "on": ["crash"] }
+      "retry": { "max": 1, "on": ["crash"] },
+      "parallel": true
     },
     {
       "id": "test",

@@ -1,7 +1,7 @@
 {
   "api": "scenario/1.0",
   "scenario": "04-recovery",
-  "description": "恢复:建两个任务 → 重启 daemon(同一状态目录)→ task.status/task.list/grants.of 从事件重放一致恢复;daemon 级事件出现 daemon.recovered 且 in-flight 计数为 0。§6:内存态 = 重放,升级/重启不得丢运行状态。",
+  "description": "恢复:建两个任务 → 重启 daemon(同一状态目录)→ task.status/task.list/grants.of 从事件重放一致恢复;daemon 级事件出现 daemon.recovered,in-flight 计数为 2(§6 对账语义:两个任务的基线授予仍存活,无孤儿沙箱、无 correction)。内存态 = 重放,升级/重启不得丢运行状态。",
   "protocol_refs": [
     "§6 状态与恢复(事件溯源:恢复 = 重放事件)",
     "§3.3 审计日志 = 事件日志,同一份"
@@ -95,7 +95,7 @@
     "expect": [
       { "type": "daemon.started" },
       { "type": "daemon.started" },
-      { "type": "daemon.recovered", "payload": { "inFlight": 0 } }
+      { "type": "daemon.recovered", "payload": { "inFlight": 2, "corrected": 0 } }
     ]
   }
 }

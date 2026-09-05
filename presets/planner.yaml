@@ -1,0 +1,19 @@
+# Agent 预设示例(来自设计文档 §3.2,作为 presets/ 目录约定样例)
+# Planner(§3.5a):把 intent 拆成可执行节点计划;本身是一个 Agent 预设,基座可替换。
+api: preset/1.0
+name: planner
+description: "规划者:读取 intent 与可用预设清单,产出节点计划与验收映射"
+base: any                        # any | claude-code | codex | opencode
+model:
+  tier: standard                 # fast | standard | heavy(经 Model Score Registry 解析,§3.9)
+  fallback: [standard, fast]
+skills:
+  - task-decomposition
+baseline_grants:                 # 基线授予(见 §3.3):Planner 只读,不碰产出物
+  - { cap: fs:workdir, scope: ro }
+io_contracts:                    # 与编排契约对应(见 §3.5)
+  inputs:  [{ name: intent, type: file:markdown }]
+  outputs: [{ name: plan, type: file:markdown }]
+escalation_policy:               # 升级申请默认策略(可被主控会话覆盖)
+  auto_approve: []
+  require_approval: ["*"]

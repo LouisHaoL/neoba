@@ -111,7 +111,9 @@ export class GrantExecutor {
     return { manifest: this.manifest(agentId) as GrantManifest, mountIntents };
   }
 
-  /** 授予原语(P2 审批流也用它):校验 cap/scope,发出 granted 审计。 */
+  /** 授予原语(P2 审批流也用它):校验 cap/scope,发出 granted 审计。
+   *  decisionSource / by 可按条覆盖(P2 审批:自动放行 auto_rule:{id}、
+   *  人工批准 manual:{principal});缺省用构造时的实例级默认。 */
   async grant(
     agentId: string,
     request: {
@@ -121,6 +123,8 @@ export class GrantExecutor {
       ttl?: string | null;
       constraint?: GrantConstraint;
       reqId?: string;
+      decisionSource?: string;
+      by?: string;
     },
   ): Promise<Grant> {
     assertAgentId(agentId);
@@ -144,7 +148,7 @@ export class GrantExecutor {
       ...(request.constraint !== undefined ? { constraint: request.constraint } : {}),
     };
     state.grants.push(grant);
-    await this.record(state, agentId, 'granted', grant.cap, request.reqId);
+    await this.record(state, agentId, 'granted', grant.cap, request.reqId, request.decisionSource, request.by);
     return grant;
   }
 
@@ -189,6 +193,15 @@ export class GrantExecutor {
     return this.agents.get(agentId)?.grants ?? [];
   }
 
+  /** 全量授予视图(TTL 到期回收等守护扫描用,P2 审批流)。 */
+  allGrants(): readonly { readonly agentId: string; readonly grant: Grant }[] {
+    const out: { agentId: string; grant: Grant }[] = [];
+    for (const [agentId, state] of this.agents) {
+      for (const grant of state.grants) out.push({ agentId, grant });
+    }
+    return out;
+  }
+
   private mountIntent(
     entry: NonNullable<ReturnType<LoadedRegistry['get']>>,
     grant: Grant,
@@ -208,12 +221,14 @@ export class GrantExecutor {
     event: AuditEntry['event'],
     cap: string,
     reqId?: string,
+    decisionSource?: string,
+    by?: string,
   ): Promise<void> {
     const entry: AuditEntry = {
       event,
       cap,
-      by: this.actor,
-      decision_source: this.decisionSource,
+      by: by ?? this.actor,
+      decision_source: decisionSource ?? this.decisionSource,
       at: this.now().toISOString(),
       ...(reqId !== undefined ? { req_id: reqId } : {}),
     };

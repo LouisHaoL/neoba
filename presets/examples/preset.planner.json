@@ -1,0 +1,22 @@
+{
+  "api": "preset/1.0",
+  "name": "planner/tech-split",
+  "description": "规划者:读取 intent 与可用预设清单,产出节点计划(split_plan)与验收映射",
+  "base": "any",
+  "model": {
+    "tier": "standard",
+    "fallback": ["standard", "fast"]
+  },
+  "skills": ["task-decomposition"],
+  "baseline_grants": [
+    { "cap": "fs:workdir", "scope": "ro" }
+  ],
+  "io_contracts": {
+    "inputs": [{ "name": "intent", "type": "file:markdown" }],
+    "outputs": [{ "name": "split_plan", "type": "file:markdown" }]
+  },
+  "escalation_policy": {
+    "auto_approve": [],
+    "require_approval": ["*"]
+  }
+}

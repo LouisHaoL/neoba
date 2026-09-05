@@ -1,0 +1,133 @@
+{
+  "api": "scenario/1.0",
+  "scenario": "07-session-tokens",
+  "description": "双 token 模型(§6 M3):session.init 签发绑定 (tenant, session) 的会话 token,持有者可在绑定 principal 内建任务;显式异 principal → SESSION_FORBIDDEN(403);daemon 重启后会话表清空,token 虽在注册表但会话未激活 → SESSION_UNKNOWN;bootstrap token(admin)全程不受影响。",
+  "protocol_refs": [
+    "§3.0 握手与版本协商",
+    "§6 鉴权(bootstrap token = admin;session token 绑定 principal)",
+    "§6 事件溯源(重启恢复:任务重放,会话须重新握手)"
+  ],
+  "setup": {
+    "presets": [
+      {
+        "api": "preset/1.0",
+        "name": "e2e-tester",
+        "description": "端到端测试执行者:跑 Playwright 用例并输出报告",
+        "base": "any",
+        "model": { "tier": "standard", "fallback": ["standard", "fast"] },
+        "skills": ["playwright-basics"],
+        "baseline_grants": [
+          { "cap": "fs:workdir", "scope": "rw" }
+        ],
+        "io_contracts": {
+          "inputs": [],
+          "outputs": [{ "name": "test_report", "type": "file:markdown" }]
+        },
+        "escalation_policy": { "auto_approve": [], "require_approval": ["*"] }
+      }
+    ]
+  },
+  "steps": [
+    {
+      "name": "会话握手并捕获签发的会话 token(明文只出现一次)",
+      "call": "session.init",
+      "params": {
+        "protocol": "1.0",
+        "role": "orchestrator",
+        "principal": { "tenant": "acme", "session": "dev-1" },
+        "harness": "golden-harness",
+        "capabilities": {}
+      },
+      "capture": { "SESSION_TOKEN": "result.token" },
+      "expect": {
+        "result": {
+          "session": { "tenant": "acme", "session": "dev-1", "role": "orchestrator" },
+          "token": { "$regex": "^[A-Za-z0-9_-]{20,}$" }
+        }
+      }
+    },
+    {
+      "name": "会话 token 在绑定 principal 内建任务(省略 tenant/session = 取绑定值)",
+      "call": "task.create",
+      "auth": "session",
+      "params": {
+        "intent": "会话身份的回归任务",
+        "preset": "e2e-tester"
+      },
+      "capture": { "TASK": "result.task_id" },
+      "expect": {
+        "result": {
+          "task_id": { "$regex": "^task-[0-9a-z]+-[0-9a-z]+$" },
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "name": "显式传入与绑定一致的 principal 同样放行",
+      "call": "task.create",
+      "auth": "session",
+      "params": {
+        "intent": "显式 principal 一致",
+        "preset": "e2e-tester",
+        "tenant": "acme",
+        "session": "dev-1"
+      },
+      "expect": {
+        "result": { "status": "completed" }
+      }
+    },
+    {
+      "name": "显式异 principal → SESSION_FORBIDDEN(403/-32014)",
+      "call": "task.create",
+      "auth": "session",
+      "params": {
+        "intent": "越权尝试",
+        "preset": "e2e-tester",
+        "tenant": "acme",
+        "session": "other"
+      },
+      "expect": {
+        "http": 403,
+        "error_code": -32014,
+        "error": { "code": "SESSION_FORBIDDEN", "tenant": "acme", "session": "dev-1" }
+      }
+    },
+    {
+      "name": "重启:事件重放恢复任务,会话表清空(hash token 表保留)",
+      "op": "restart"
+    },
+    {
+      "name": "重启后会话未激活,session token 不可用 → SESSION_UNKNOWN(404/-32011)",
+      "call": "task.create",
+      "auth": "session",
+      "params": {
+        "intent": "重启后的会话 token",
+        "preset": "e2e-tester"
+      },
+      "expect": {
+        "http": 404,
+        "error_code": -32011,
+        "error": { "code": "SESSION_UNKNOWN", "tenant": "acme", "session": "dev-1" }
+      }
+    },
+    {
+      "name": "重启后任务记录重放仍在(会话身份视角不可见属正常,admin 视角可见)",
+      "call": "task.list",
+      "expect": {
+        "result": {
+          "tasks": {
+            "$contains": [{ "session": "dev-1", "status": "completed" }]
+          }
+        }
+      }
+    },
+    {
+      "name": "bootstrap token(admin)不受双 token 模型影响",
+      "call": "task.status",
+      "params": { "task_id": "${TASK}" },
+      "expect": {
+        "result": { "task": { "tenant": "acme", "session": "dev-1", "status": "completed" } }
+      }
+    }
+  ]
+}

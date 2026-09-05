@@ -20,6 +20,8 @@ function linuxRoutes(overrides: Record<string, ReturnType<typeof okResult>> = {}
     'unshare --user true': okResult(''),
     'docker info --format {{json .SecurityOptions}}':
       okResult('["name=seccomp,profile=unconfined"]\n'),
+    // M6:secret-tool 探测(lookup 无匹配也说明工具可用,回退出码 1)
+    'secret-tool lookup service neoba': { code: 1, stdout: '', stderr: '' },
     ...overrides,
   };
 }
@@ -48,6 +50,12 @@ test('Linux + docker 全可用:推荐 docker 后端', async () => {
   assertCheck(report.checks, 'docker-seccomp-userns', 'ok');
   assert.equal(report.codexReady, true);
   assert.equal(report.codexReadyReason, null);
+  // OpenCode 基座前置(§4 P3):无 userns 要求,docker daemon 可达即满足
+  assert.equal(report.opencodeReady, true);
+  assert.equal(report.opencodeReadyReason, null);
+  // M6:secret-tool 探测路由存在 → keyring 后端可接线
+  assert.equal(report.keyringReady, true);
+  assert.equal(report.keyringReadyReason, null);
 
   // Linux 上不应出现 Windows 专项检测
   assert.ok(!report.checks.some((c) => c.id.startsWith('wsl-')));
@@ -102,6 +110,9 @@ test('Linux 无 docker:各 docker 项失败,后端 none 且带建议', async () 
   assertCheck(report.checks, 'docker-compose', 'warn');
   const cli = report.checks.find((c) => c.id === 'docker-cli');
   assert.ok(cli?.suggestion !== undefined);
+  // OpenCode 前置随 daemon 不可达而失败,原因可读
+  assert.equal(report.opencodeReady, false);
+  assert.ok(report.opencodeReadyReason?.includes('docker daemon'));
 });
 
 test('Linux docker 装了但 daemon 不可达:后端 none,compose 走 v1 回退', async () => {

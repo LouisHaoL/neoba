@@ -1,0 +1,89 @@
+{
+  "api": "scenario/1.0",
+  "scenario": "06-parallel-dag",
+  "description": "并行 DAG:workflow.run 提交 菱形 工作流(u → {a ∥ b} → c, intent.constraints.max_parallel=2)→ await 到终态 completed。并行批内 a/b 的启动顺序不确定,事件断言用 set 模式(无序多重集包含):四个节点各 started/completed 一次,c 的端口工件发布入账。串行 DAG 的有序断言由场景 01/02 覆盖,本场景钉住 §3.5 P3 并行语义的集合级不变量。",
+  "protocol_refs": [
+    "§3.5 WorkflowSpec(节点 parallel 语义,intent.constraints.max_parallel 上限)",
+    "§3.7 交付契约(端口工件发布 = 写屏障)",
+    "§6 事件溯源(编排事件序的确定性)"
+  ],
+  "setup": {
+    "presets": [
+      {
+        "api": "preset/1.0",
+        "name": "coder",
+        "description": "通用执行者(场景桩基座):发布 code 端口工件",
+        "base": "any",
+        "skills": [],
+        "baseline_grants": [{ "cap": "fs:workdir", "scope": "rw" }],
+        "io_contracts": {
+          "inputs": [{ "name": "code", "type": "text" }],
+          "outputs": [{ "name": "code", "type": "text" }]
+        },
+        "escalation_policy": { "auto_approve": [], "require_approval": ["*"] }
+      }
+    ]
+  },
+  "steps": [
+    {
+      "name": "提交并行 DAG(菱形:u → a ∥ b → c)",
+      "call": "workflow.run",
+      "params": {
+        "intent": {
+          "api": "intent/1.0",
+          "goal": "并行 DAG 冒烟:菱形依赖图跑通并交付",
+          "acceptance": ["菱形四节点全部完成,c 节点交付 code 工件"],
+          "constraints": { "max_parallel": 2 }
+        },
+        "workflow": {
+          "api": "workflow/1.0",
+          "intent_ref": "intent-parallel-01",
+          "nodes": [
+            { "id": "u", "preset": "coder" },
+            { "id": "a", "preset": "coder", "parallel": true, "inputs": [{ "from": "u.outputs.code" }] },
+            { "id": "b", "preset": "coder", "parallel": true, "inputs": [{ "from": "u.outputs.code" }] },
+            { "id": "c", "preset": "coder", "inputs": [{ "from": "a.outputs.code" }, { "from": "b.outputs.code" }] }
+          ],
+          "outputs": [{ "from": "c.outputs.code", "required": true }],
+          "feedback": [],
+          "evidence": [{ "node": "c", "artifact": "code", "must_exist": true, "sha256_recorded": true }]
+        }
+      },
+      "capture": { "TASK": "result.task_id" },
+      "expect": {
+        "result": {
+          "task_id": { "$regex": "^task-[a-z0-9-]+$" },
+          "status": "created"
+        }
+      }
+    },
+    {
+      "name": "等待终态(异步编排完成)",
+      "op": "await.task",
+      "task_id": "${TASK}",
+      "expect": {
+        "taskId": "${TASK}",
+        "status": "completed"
+      }
+    }
+  ],
+  "events": {
+    "match": "set",
+    "scope": { "tenant": "default", "task": "${TASK}" },
+    "expect": [
+      { "type": "node.started", "payload": { "nodeId": "u" } },
+      { "type": "node.started", "payload": { "nodeId": "a" } },
+      { "type": "node.started", "payload": { "nodeId": "b" } },
+      { "type": "node.started", "payload": { "nodeId": "c" } },
+      { "type": "node.completed", "payload": { "nodeId": "u" } },
+      { "type": "node.completed", "payload": { "nodeId": "a" } },
+      { "type": "node.completed", "payload": { "nodeId": "b" } },
+      { "type": "node.completed", "payload": { "nodeId": "c" } },
+      { "type": "sandbox.destroyed" },
+      { "type": "sandbox.destroyed" },
+      { "type": "sandbox.destroyed" },
+      { "type": "sandbox.destroyed" },
+      { "type": "artifact.published", "payload": { "node": "c", "name": "code", "kind": "file" } }
+    ]
+  }
+}
