@@ -1,7 +1,7 @@
 /**
  * engine 模块出口(§3.5 编排执行引擎;§9 P1 执行链闭环 / P2 WorkflowSpec 引擎)。
  */
-export { NodeExecutor, argsDigest } from './node-executor.ts';
+export { NodeExecutor, argsDigest, baselineScopeQueue } from './node-executor.ts';
 export type { ExecuteNodeParams, NodeExecutorDeps, SecretInjector } from './node-executor.ts';
 export type { PoolAcquireResult, PoolReleaseVerdict, SandboxPool } from '../provision/warm-pool.ts';
 export { WarmPool } from '../provision/warm-pool.ts';
@@ -22,6 +22,7 @@ export {
 } from './errors.ts';
 export type {
   EngineEmit,
+  GrantAuditContext,
   NodeRunContext,
   NodeRuntime,
   PublishedOutput,

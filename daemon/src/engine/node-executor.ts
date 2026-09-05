@@ -13,11 +13,12 @@
  * - 预算 hard 触发(budget.record → action=paused)立即终止节点,
  *   reason=budget_paused,升级主控的续预算/终止决策归调用方(§3.5f);
  * - 基线授予按 agent(= task/node)一次;重复(反馈回打后重跑同一节点)
- *   视为已就绪,幂等跳过 —— grant manifest 持久于事件日志(§6 重放重建)。
+ *   视为已就绪,幂等跳过 —— grant manifest 持久于事件日志(§6 重放重建);
+ *   审计经 withGrantAudit 给出的上下文落 grant.granted(与 task.create 同形)。
  */
 import { createHash } from 'node:crypto';
 import { BaselineAlreadyApplied } from '../capability/index.ts';
-import type { GrantExecutor } from '../capability/index.ts';
+import type { BaselineApplyResult, GrantExecutor } from '../capability/index.ts';
 import type { Preset } from '../capability/types.ts';
 import { ArtifactRepository } from '../artifacts/repository.ts';
 import type { ArtifactNamespace } from '../artifacts/repository.ts';
@@ -28,6 +29,7 @@ import type { NetworkPolicy, SandboxHandle, SandboxProvider } from '../provision
 import { GateAborted } from './gate.ts';
 import type {
   EngineEmit,
+  GrantAuditContext,
   NodeExecutionResult,
   NodeRunContext,
   NodeRuntime,
@@ -51,6 +53,17 @@ export interface NodeExecutorDeps {
   readonly runtime: NodeRuntime;
   readonly artifacts: ArtifactRepository;
   readonly grants: GrantExecutor;
+  /**
+   * 基线授予审计上下文包装(可选;daemon 注入):grant 审计 sink 依赖调用侧
+   * 上下文(principal + cap→scope 队列)落 grant.granted —— task.create 路径
+   * 经 AsyncLocalStorage 携带,引擎路径从这里显式给出(issue #1),授予返回的
+   * manifest 快照可顺手同步给调用方的查询面。缺省不包装(独立 engine 测试
+   * 零漂移,sink 无上下文时静默跳过)。
+   */
+  readonly withGrantAudit?: (
+    ctx: GrantAuditContext,
+    apply: () => Promise<BaselineApplyResult>,
+  ) => Promise<BaselineApplyResult>;
   /** 事件出口(daemon 接 EventLog.append;测试接数组)。 */
   readonly emit: EngineEmit;
   readonly now?: () => Date;
@@ -107,8 +120,16 @@ export class NodeExecutor {
     });
 
     // 基线授予:manifest 按事件日志重建(§6),重复 apply = 已就绪,幂等跳过。
+    // 审计上下文显式给出(principal 带 task/agent 两层),grant.granted 才落事件。
+    const applyBaseline = (): Promise<BaselineApplyResult> =>
+      this.#deps.grants.applyBaseline(agentId, preset);
     try {
-      await this.#deps.grants.applyBaseline(agentId, preset);
+      await (this.#deps.withGrantAudit !== undefined
+        ? this.#deps.withGrantAudit(
+            { principal, scopeQueue: baselineScopeQueue(preset) },
+            applyBaseline,
+          )
+        : applyBaseline());
     } catch (err) {
       if (!(err instanceof BaselineAlreadyApplied)) throw err;
     }
@@ -388,6 +409,20 @@ export class NodeExecutor {
 function sanitizedEnvName(secretId: string, index: number): string {
   const name = secretId.replace(/[^A-Za-z0-9_]/g, '_');
   return name.length > 0 ? name : String(index);
+}
+
+/**
+ * 基线授予的 cap→scope 队列(同一 cap 授多个 scope 时,sink 事件只带 cap,
+ * 按 FIFO 弹出对应 scope)。task.create 路径与引擎路径共用同一形状。
+ */
+export function baselineScopeQueue(preset: Preset): Map<string, string[]> {
+  const queue = new Map<string, string[]>();
+  for (const grant of preset.baseline_grants) {
+    const list = queue.get(grant.cap) ?? [];
+    list.push(grant.scope);
+    queue.set(grant.cap, list);
+  }
+  return queue;
 }
 
 /** 指令摘要(sandbox.execed 的 argsDigest,不回传全量参数)。 */

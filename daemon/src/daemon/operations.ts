@@ -36,7 +36,7 @@ import { handleSessionInit } from '../session/index.ts';
 import { checkWorkflow } from '../plancheck/index.ts';
 import type { IntentDoc, WorkflowDoc } from '../plancheck/index.ts';
 import { parseIntent, parseOutputBinding } from '../plancheck/index.ts';
-import { WorkflowEngine, RunNotPaused, RunUnknown } from '../engine/index.ts';
+import { WorkflowEngine, RunNotPaused, RunUnknown, baselineScopeQueue } from '../engine/index.ts';
 import type { WorkflowRunResult } from '../engine/index.ts';
 import { BudgetLedger } from '../budget/index.ts';
 import { TIERS } from '../modelscore/index.ts';
@@ -338,14 +338,8 @@ export class Operations {
           extra: { intent, preset: presetName },
         },
       });
-      const scopeQueue = new Map<string, string[]>();
-      for (const grant of preset.baseline_grants) {
-        const list = scopeQueue.get(grant.cap) ?? [];
-        list.push(grant.scope);
-        scopeQueue.set(grant.cap, list);
-      }
       const { manifest, mountIntents } = await this.#apply.run(
-        { principal, scopeQueue },
+        { principal, scopeQueue: baselineScopeQueue(preset) },
         () => this.#ctx.grants.applyBaseline(agentId, preset),
       );
       this.#ctx.tasks.setManifest(manifest);

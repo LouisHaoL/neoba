@@ -195,6 +195,15 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     artifacts,
     grants,
     emit: engineEmit,
+    // 引擎路径的基线授予审计(issue #1):进 task.create 同一 ALS 上下文,
+    // grant sink 据此落 grant.granted(principal 带 task/agent 两层,与
+    // task.create 同一事件形状);manifest 快照同步 TaskStore,grants.of
+    // 即时可见,重启重放与实态一致(§6 唯一事实源)。
+    withGrantAudit: async (ctx, applyBaseline) => {
+      const applied = await apply.run(ctx, applyBaseline);
+      tasks.setManifest(applied.manifest);
+      return applied;
+    },
     ...(opts.pool !== undefined ? { pool: opts.pool } : {}),
     ...(opts.image !== undefined ? { image: opts.image } : {}),
     ...(secretInjector !== undefined ? { secrets: secretInjector } : {}),
