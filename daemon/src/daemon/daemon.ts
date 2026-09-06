@@ -53,7 +53,7 @@ import type { LoadedModelRegistry } from '../modelscore/index.ts';
 import type { SecretStore } from '../secrets/index.ts';
 import { Operations, DEFAULT_TENANT, makeGrantSink } from './operations.ts';
 import type { ApplyContext } from './operations.ts';
-import { ModelRegistryStore, makeApprovalEmit, makeEngineEmit, sandboxReconciler } from './wiring.ts';
+import { ModelRegistryStore, makeApprovalEmit, makeEngineEmit, principalFromAgentId, sandboxReconciler } from './wiring.ts';
 import { DEFAULT_MAX_BODY_BYTES, DEFAULT_PORT, startHttpBinding, stopHttpBinding } from './http.ts';
 import { DaemonPortInUse, DaemonError, RpcError } from './errors.ts';
 import { generateToken, TOKEN_FILE_NAME, writeTokenFile } from './token.ts';
@@ -174,7 +174,27 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
   const registry = opts.registry ?? defaultRegistry();
   const sessions = new SessionRegistry();
   const apply = new AsyncLocalStorage<ApplyContext>();
-  const grants = new GrantExecutor(registry, { sink: makeGrantSink(apply, events) });
+  const grants = new GrantExecutor(registry, {
+    sink: makeGrantSink(apply, events, {
+      // 无 ALS 兜底(issue #15):reclaimExpired 定时器路径的回收事件按
+      // agentId 反推 principal 直接落盘,TTL 回收不再只发生在内存;落盘后
+      // 同步 TaskStore manifest 快照,grants.of 即时反映回收(重放态与实态
+      // 一致,不依赖重启)。principal.agent 存完整 agentId(与基线路径同一
+      // 事件形状),重放/恢复循环按 principal.agent 归账。
+      resolvePrincipal: (agentId) => ({ ...principalFromAgentId(agentId, tasks), agent: agentId }),
+      syncRevoke: (agentId, cap, scope) => {
+        const manifest = tasks.manifest(agentId);
+        if (manifest === undefined) return;
+        tasks.setManifest({
+          ...manifest,
+          // scope 未指明 = 该 cap 全部 scope(与 GrantExecutor.revoke 同口径)。
+          grants: manifest.grants.filter(
+            (g) => g.cap !== cap || (scope !== undefined && g.scope !== scope),
+          ),
+        });
+      },
+    }),
+  });
   const profile = opts.profile ?? defaultProfile(version);
   const presets = opts.presets ?? defaultPresets();
 
@@ -297,7 +317,19 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
 
   // escalation 授予跨重启恢复(重放的 grant.granted → GrantExecutor 内存),
   // TTL 回收守护因此能看到重启前批出的授予;重复/失效条目不阻断启动。
+  // grant.revoked 同步回放(issue #15):已回收授予按 (cap,scope) 精确移除
+  // (旧事件缺 scope = 该 cap 全部 scope,与 replayTasks 同口径),不再被
+  // 重建为永久 in-flight;silent = 事件已在日志,不再经 sink 补审计。
   for (const ev of replayed) {
+    if (ev.type === 'grant.revoked') {
+      if (ev.principal.agent === null) continue;
+      const payload = ev.payload as unknown as Record<string, unknown>;
+      const scope = typeof payload['scope'] === 'string' ? (payload['scope'] as Scope) : undefined;
+      await grants
+        .revoke(ev.principal.agent, String(payload['cap'] ?? ''), scope, { silent: true })
+        .catch(() => {});
+      continue;
+    }
     if (ev.type !== 'grant.granted' || ev.principal.agent === null) continue;
     const payload = ev.payload as unknown as Record<string, unknown>;
     const source = typeof payload['source'] === 'string' ? payload['source'] : '';

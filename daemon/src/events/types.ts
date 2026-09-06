@@ -162,6 +162,12 @@ export interface GrantGrantedPayload extends TtlCarrier {
 
 export interface GrantRevokedPayload extends EventPayloadBase {
   readonly cap: string;
+  /**
+   * 被回收授予的 scope(issue #15)。同 cap 可持多 scope(如 baseline rw +
+   * escalation r),缺它重放只能按 cap 全删,会把未回收的 scope 一并删掉。
+   * 向前兼容:旧事件缺省该字段,重放方保持"按 cap 全删"的既有行为。
+   */
+  readonly scope?: string;
   readonly reason: string;
   readonly decisionSource?: DecisionSource;
   /** 对应 grant.granted 事件的 seq(可回链审计)。 */
@@ -285,6 +291,12 @@ export interface ApprovalDecidedPayload extends EventPayloadBase {
   readonly decisionSource: DecisionSource;
   /** 授权可窄于申请:申请 fs:rw 只授 workdir 子目录。 */
   readonly narrowedTo?: string;
+  /**
+   * issue #15:申请的 cap+scope 定案时已被持有(GrantDuplicate 幂等吞掉,
+   * 未新建授予、无新 TTL)→ 标注 already_held,「授权到期即回收」不静默失效。
+   * 增量字段,旧事件缺省 = 未标注(向前兼容)。
+   */
+  readonly already_held?: boolean;
 }
 
 // ---------------------------------------------------------------- 恢复对账(§6)

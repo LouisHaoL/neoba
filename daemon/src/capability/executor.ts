@@ -102,7 +102,7 @@ export class GrantExecutor {
         };
         state.grants.push(grant);
         mountIntents.push(this.mountIntent(entry, grant));
-        await this.record(state, agentId, 'granted', grant.cap);
+        await this.record(state, agentId, 'granted', grant.cap, grant.scope);
       }
     } catch (err) {
       this.agents.delete(agentId);
@@ -148,15 +148,31 @@ export class GrantExecutor {
       ...(request.constraint !== undefined ? { constraint: request.constraint } : {}),
     };
     state.grants.push(grant);
-    await this.record(state, agentId, 'granted', grant.cap, request.reqId, request.decisionSource, request.by);
+    await this.record(
+      state,
+      agentId,
+      'granted',
+      grant.cap,
+      grant.scope,
+      request.reqId,
+      request.decisionSource,
+      request.by,
+    );
     return grant;
   }
 
   /**
    * 回收原语:移除该 agent 的指定 cap 授予(scope 省略 = 该 cap 全部 scope),
    * 每条移除发出 reclaimed 审计;返回移除条数。agent 未注册 → AgentUnknown。
+   * options.silent(issue #15):重放恢复路径用 —— 事件已在日志里,不再经
+   * sink 补审计(否则每次重启都会追加重复的 grant.revoked)。
    */
-  async revoke(agentId: string, cap: string, scope?: Scope): Promise<number> {
+  async revoke(
+    agentId: string,
+    cap: string,
+    scope?: Scope,
+    options: { readonly silent?: boolean } = {},
+  ): Promise<number> {
     const state = this.agents.get(agentId);
     if (state === undefined) throw new AgentUnknown(agentId);
     const kept: Grant[] = [];
@@ -169,8 +185,9 @@ export class GrantExecutor {
       }
     }
     state.grants = kept;
+    if (options.silent === true) return removed.length;
     for (const grant of removed) {
-      await this.record(state, agentId, 'reclaimed', grant.cap);
+      await this.record(state, agentId, 'reclaimed', grant.cap, grant.scope);
     }
     return removed.length;
   }
@@ -220,6 +237,7 @@ export class GrantExecutor {
     agentId: string,
     event: AuditEntry['event'],
     cap: string,
+    scope?: Scope,
     reqId?: string,
     decisionSource?: string,
     by?: string,
@@ -234,7 +252,9 @@ export class GrantExecutor {
     };
     state.audit.push(entry);
     if (this.sink !== null) {
-      await this.sink({ ...entry, agentId });
+      // scope 只随 sink 事件走(供 grant.granted/revoked payload 精确回收),
+      // 不进 manifest 的 audit 条目(schema 冻结)。
+      await this.sink({ ...entry, agentId, ...(scope !== undefined ? { scope } : {}) });
     }
   }
 }

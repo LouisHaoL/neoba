@@ -175,7 +175,14 @@ export function replayTasks(events: readonly Event[]): TaskStore {
         const state = grantStates.get(agent);
         if (state === undefined) break;
         const cap = String(payload['cap'] ?? '');
-        state.grants = state.grants.filter((grant) => grant.cap !== cap);
+        // issue #15:payload 带 scope 时按 (cap, scope) 精确回收 —— 同 cap 可
+        // 持多 scope(baseline rw + escalation r),只删被回收的那个,重放态
+        // 不再与实态分叉。向前兼容:旧事件缺 scope 时保持"按 cap 全删"的
+        // 既有行为。
+        const scope = typeof payload['scope'] === 'string' ? String(payload['scope']) : null;
+        state.grants = state.grants.filter(
+          (grant) => grant.cap !== cap || (scope !== null && grant.scope !== scope),
+        );
         state.audit.push({
           event: 'reclaimed',
           cap,

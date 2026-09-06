@@ -161,19 +161,25 @@ export class ApprovalBoard {
       // 与人工定案同序(issue #14):先授予成功,再置 granted 状态并落 decided
       // 事件 —— 授予失败时台账保持 pending(重启重放后同样回到 pending),
       // 不会出现"事件已批、实际未授权且不可重试"的断态。
-      const manifest = await this.#grant(request, decisionSource);
+      const { manifest, alreadyHeld } = await this.#grant(request, decisionSource);
       const record: ApprovalRecord = {
         ...base,
         status: 'granted',
         decidedAt: now,
         decidedBy: 'daemon',
         decisionSource,
+        ...(alreadyHeld ? { alreadyHeld: true } : {}),
       };
       this.#records.set(request.reqId, record);
       await this.#emit({
         type: 'approval.decided',
         agentId: request.from,
-        payload: { reqId: request.reqId, decision: 'granted', decisionSource },
+        payload: {
+          reqId: request.reqId,
+          decision: 'granted',
+          decisionSource,
+          ...(alreadyHeld ? { already_held: true } : {}),
+        },
       });
       return { status: 'auto_granted', record, manifest };
     }
@@ -214,7 +220,7 @@ export class ApprovalBoard {
       return { status: 'denied', record: decided };
     }
     // 先授予(失败原样抛出,record 未动,仍是 pending 可重试)。
-    const manifest = await this.#grant(
+    const { manifest, alreadyHeld } = await this.#grant(
       {
         from: record.agentId,
         reqId: record.reqId,
@@ -233,6 +239,7 @@ export class ApprovalBoard {
       decidedBy: by,
       decisionSource,
       ...(options.narrowedTo !== undefined ? { narrowedTo: options.narrowedTo } : {}),
+      ...(alreadyHeld ? { alreadyHeld: true } : {}),
     };
     this.#records.set(reqId, decided);
     await this.#emit({
@@ -243,6 +250,7 @@ export class ApprovalBoard {
         decision,
         decisionSource,
         ...(options.narrowedTo !== undefined ? { narrowedTo: options.narrowedTo } : {}),
+        ...(alreadyHeld ? { already_held: true } : {}),
       },
     });
     return { status: 'granted', record: decided, manifest };
@@ -311,6 +319,8 @@ export class ApprovalBoard {
               : 'unknown',
           decisionSource: p.decisionSource,
           ...(p.narrowedTo !== undefined ? { narrowedTo: p.narrowedTo } : {}),
+          // issue #15:already_held 标注随事件重放还原(旧事件缺省 = 未标注)。
+          ...(p.already_held === true ? { alreadyHeld: true } : {}),
         });
       }
     }
@@ -343,10 +353,11 @@ export class ApprovalBoard {
     request: ToolRequestSpec,
     decisionSource: string,
     narrowedTo?: string,
-  ): Promise<GrantManifest> {
+  ): Promise<{ readonly manifest: GrantManifest; readonly alreadyHeld: boolean }> {
     const ttl = new Date(
       this.#now().getTime() + (durationMs(request.duration) as number),
     ).toISOString();
+    let alreadyHeld = false;
     try {
       await this.#grants.grant(request.from, {
         cap: request.cap,
@@ -361,11 +372,14 @@ export class ApprovalBoard {
       });
     } catch (err) {
       // 已持有同 cap+scope 授予:幂等视为成功(授予已在,无需重复)。
+      // issue #15:不再纯静默 —— alreadyHeld 标注进台账与 decided 事件,
+      // "未新建授予、无新 TTL(授权到期即回收失效)"在审计里可见。
       if (!(err instanceof GrantDuplicate)) throw err;
+      alreadyHeld = true;
     }
     const manifest = this.#grants.manifest(request.from);
     if (manifest === undefined) throw new AgentUnknown(request.from);
-    return manifest;
+    return { manifest, alreadyHeld };
   }
 }
 

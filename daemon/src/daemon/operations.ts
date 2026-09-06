@@ -97,6 +97,14 @@ export interface ApplyContext {
   readonly scopeQueue: Map<string, string[]>;
 }
 
+/** grant 审计 sink 的可选挂钩(无 ALS 上下文路径的兜底,issue #15)。 */
+export interface GrantSinkHooks {
+  /** 无 ALS 上下文时按 agentId 反推 principal(reclaimed 兜底落盘用)。 */
+  readonly resolvePrincipal?: (agentId: string) => Principal;
+  /** 回收事件落盘后同步 TaskStore 的 manifest 快照(移除被回收授予)。 */
+  readonly syncRevoke?: (agentId: string, cap: string, scope: string | undefined) => void;
+}
+
 export interface OperationsContext {
   readonly profile: DaemonProfile;
   readonly registry: LoadedRegistry;
@@ -126,25 +134,53 @@ export interface OperationsContext {
  * 把 EventLog 包成 GrantExecutor 的审计 sink:granted/reclaimed 全量入事件日志
  * (§3.3 审计日志 = 事件日志同一份)。上下文经 AsyncLocalStorage 携带,
  * 并发 task.create 互不串线。
+ *
+ * issue #15 兜底:TTL 回收(reclaimExpired 定时器)没有 apply ALS 上下文,
+ * 原 sink 在此静默 skip,grant.revoked 从不落盘,重放把已回收授予重建为
+ * 永久 in-flight —— 现在 reclaimed 事件经 hooks.resolvePrincipal 从 agentId
+ * 反推 principal 直接落盘(不依赖 ALS),并经 hooks.syncRevoke 同步 TaskStore
+ * manifest 快照(grants.of 即时可见)。granted 无 ALS 仍跳过:审批授予的
+ * grant.granted 由 emitEscalationGrants 按 manifest 差量补账(source/TTL/
+ * constraint 语义在那里才完整,sink 的 AuditEntry 携带不了)。
  */
 export function makeGrantSink(
   apply: AsyncLocalStorage<ApplyContext>,
   log: EventLog,
+  hooks: GrantSinkHooks = {},
 ): EventSink {
   return (entry: GrantAuditEvent) => {
     const ctx = apply.getStore();
-    if (ctx === undefined) return Promise.resolve();
     const type = entry.event === 'granted' ? ('grant.granted' as const) : ('grant.revoked' as const);
+    if (ctx === undefined) {
+      if (type !== 'grant.revoked' || hooks.resolvePrincipal === undefined) {
+        return Promise.resolve();
+      }
+      return log.append({
+        type,
+        principal: hooks.resolvePrincipal(entry.agentId),
+        payload: {
+          cap: entry.cap,
+          ...(entry.scope !== undefined ? { scope: entry.scope } : {}),
+          reason: 'reclaimed',
+          decisionSource: entry.decision_source,
+        } as never,
+      }).then(() => {
+        hooks.syncRevoke?.(entry.agentId, entry.cap, entry.scope);
+        return undefined;
+      });
+    }
     const payload =
       type === 'grant.granted'
         ? {
             cap: entry.cap,
-            scope: ctx.scopeQueue.get(entry.cap)?.shift() ?? 'read',
+            // sink 事件自带授予 scope(精确);旧调用方无 scope 时退回队列 FIFO。
+            scope: entry.scope ?? ctx.scopeQueue.get(entry.cap)?.shift() ?? 'read',
             source: 'baseline',
             decisionSource: entry.decision_source,
           }
         : {
             cap: entry.cap,
+            ...(entry.scope !== undefined ? { scope: entry.scope } : {}),
             reason: 'reclaimed',
             decisionSource: entry.decision_source,
           };
@@ -152,7 +188,10 @@ export function makeGrantSink(
       type,
       principal: ctx.principal,
       payload: payload as never,
-    }).then(() => undefined);
+    }).then(() => {
+      if (type === 'grant.revoked') hooks.syncRevoke?.(entry.agentId, entry.cap, entry.scope);
+      return undefined;
+    });
   };
 }
 
@@ -770,6 +809,8 @@ export class Operations {
     const duration = requireString(p, 'duration', 'approvals.submit');
     const reason = optionalString(p, 'reason', 'approvals.submit') ?? '';
     const reqId = optionalString(p, 'req_id', 'approvals.submit') ?? newReqId(this.#ctx.now);
+    // 定案前快照该 agent 的 manifest(auto 放行的差量落 grant.granted 事件用)。
+    const beforeManifest = this.#ctx.tasks.manifest(task.agentId);
     const result = await board.submit({
       from: task.agentId,
       reqId,
@@ -778,6 +819,21 @@ export class Operations {
       scope: scope as Scope,
       duration,
     });
+    if (result.status === 'auto_granted' && result.manifest !== undefined) {
+      // issue #15:auto 放行的 escalation 授予同样全量入审计 —— GrantExecutor
+      // 的审计 sink 只覆盖 apply ALS 上下文(task.create/引擎基线路径),审批
+      // 路径无上下文会被静默 skip;这里与 approvals.decide 同款按 manifest 差量
+      // 补 grant.granted 事件并同步 TaskStore 快照(grants.of 即时可见,重启
+      // 重放可恢复)。already_held(幂等未新建授予)时差量为空,不产生事件。
+      await emitEscalationGrants(
+        this.#ctx.events,
+        this.#ctx.tasks,
+        result.record.agentId,
+        result.manifest,
+        beforeManifest?.grants ?? [],
+        result.record.decisionSource ?? 'auto_rule:unknown',
+      );
+    }
     return result.status === 'auto_granted'
       ? { req_id: result.record.reqId, status: result.status, record: result.record, manifest: result.manifest }
       : { req_id: result.record.reqId, status: result.status, record: result.record };

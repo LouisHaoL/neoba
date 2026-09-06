@@ -383,6 +383,56 @@ describe('approval/board 事件重放重建(#14)', () => {
   });
 });
 
+describe('approval/board already_held 标注(#15)', () => {
+  it('申请的 cap+scope 已被 baseline 持有:幂等不重复授予,台账/事件标注 already_held', async () => {
+    const preset = parsePreset(
+      minimalPresetDoc({
+        name: 'e2e-tester',
+        baseline_grants: [{ cap: 'mcp:playwright', scope: 'write' }],
+        escalation_policy: { auto_approve: ['mcp:playwright'], require_approval: ['*'] },
+      }),
+    );
+    const { board: b, grants, events } = board({
+      layers: () => [presetPolicyLayer('e2e-tester', preset)],
+      now: () => new Date('2026-09-05T00:00:00Z'),
+    });
+    await grants.applyBaseline('task-42/e2e-tester-01', preset);
+    const result = await b.submit(request());
+    assert.equal(result.status, 'auto_granted');
+    if (result.status !== 'auto_granted') return;
+    assert.equal(result.record.alreadyHeld, true);
+    // 未新建授予:仍只有 baseline 一条,没有 escalation 授予与 TTL。
+    assert.equal(grants.grantsOf('task-42/e2e-tester-01').length, 1);
+    const decided = events.find((e) => e.type === 'approval.decided');
+    assert.ok(decided && (decided.payload as { already_held?: boolean }).already_held === true);
+    // 重放还原 already_held 标注(增量字段,向后兼容)。
+    const second = board({ layers: () => [presetPolicyLayer('e2e-tester', preset)] });
+    second.board.restoreFromEvents(asEvents(events, 'task-42/e2e-tester-01'));
+    const restored = second.board.listAll().find((r) => r.reqId === 'req-7');
+    assert.equal(restored?.alreadyHeld, true);
+  });
+
+  it('正常新建授予(未被持有)时不标注 already_held(旧字段缺省,兼容)', async () => {
+    const preset = parsePreset(
+      minimalPresetDoc({
+        name: 'e2e-tester',
+        escalation_policy: { auto_approve: ['mcp:playwright'], require_approval: ['*'] },
+      }),
+    );
+    const { board: b, events } = board({
+      layers: () => [presetPolicyLayer('e2e-tester', preset)],
+      now: () => new Date('2026-09-05T00:00:00Z'),
+    });
+    const result = await b.submit(request({ reqId: 'req-16' }));
+    assert.equal(result.status, 'auto_granted');
+    if (result.status !== 'auto_granted') return;
+    assert.equal(result.record.alreadyHeld, undefined);
+    const decided = events.find((e) => e.type === 'approval.decided');
+    assert.ok(decided);
+    assert.equal((decided.payload as { already_held?: boolean }).already_held, undefined);
+  });
+});
+
 describe('approval/board reqId 并发去重(#14)', () => {
   it('并发同 reqId 双提交:只一份成功,只落一份 requested 事件', async () => {
     const { board: b, events } = board();
