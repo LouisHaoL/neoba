@@ -121,7 +121,30 @@ export function startHttpBinding(opts: HttpBindingOptions): Promise<Server> {
   const host = opts.host ?? DEFAULT_HOST;
   const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const server = createServer((req, res) => {
-    void handleRequest(req, res, opts, maxBodyBytes);
+    // #16 兜底:客户端在 POST body 读取中途断开时,req emit 'error' 使
+    // readBody 的 for-await 抛出;若不加 catch,`void handleRequest(...)`
+    // 形成 unhandled rejection(Node ≥15 默认直接击穿整进程)。这里对
+    // handleRequest 的 promise 挂顶层 catch:未开始写响应时归一为 JSON-RPC
+    // error(toRpcError 保持 {code, message, data} 约定,真内部错误 → -32603);
+    // 响应已开始写/连接已坏时无法再写 JSON,仅 destroy 连接并留错误日志。
+    // req/res 各挂一个 error 监听兜底,防止 body 读取窗口外的流错误在无人
+    // 处理时升级为 uncaughtException(for-await 的 rejection 仍照常抛出,
+    // 由下方 catch 消化,不影响归一逻辑)。
+    req.on('error', () => {});
+    res.on('error', () => {});
+    void handleRequest(req, res, opts, maxBodyBytes).catch((err: unknown) => {
+      if (res.writableEnded || res.headersSent || res.destroyed) {
+        // 响应流已不可写 JSON:断开连接收尾,不让单连接故障影响 daemon 存活。
+        res.destroy();
+        console.error('[daemon:http] 请求处理异常且响应已开始,连接已断开:', err);
+        return;
+      }
+      try {
+        sendJson(res, 500, errorResponse(null, toRpcError(err)));
+      } catch {
+        res.destroy();
+      }
+    });
   });
   return new Promise<Server>((resolve, reject) => {
     const onError = (err: NodeJS.ErrnoException): void => {
