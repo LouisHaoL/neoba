@@ -124,9 +124,9 @@ export const API_OPERATIONS: readonly OperationDoc[] = [
   },
   {
     method: 'grants.of',
-    summary: '查 agent 的授权 manifest(含审计轨迹;事件重放重建)',
+    summary: '查 agent 的授权 manifest(含审计轨迹;事件重放重建);session 身份仅限本人 (tenant, session) 命名空间内的 agent',
     params: [{ name: 'agent_id', type: 'string', required: true, description: 'agent id' }],
-    result: '{manifest: GrantManifest | null}',
+    result: '{manifest: GrantManifest | null};越权 → SESSION_FORBIDDEN(-32014/403)',
   },
   {
     method: 'workflow.run',
@@ -205,13 +205,13 @@ export const API_OPERATIONS: readonly OperationDoc[] = [
   },
   {
     method: 'models.list',
-    summary: '列 Model Score Registry(§3.9:per-tier observed + 样本)',
+    summary: '列 Model Score Registry(§3.9:per-tier observed + 样本);只读聚合观测,所有已认证身份可读',
     params: [],
     result: '{models: [...]}',
   },
   {
     method: 'models.feedback',
-    summary: '反馈模型实测表现(EMA 按 tier 分桶收敛;registry 不可变替换 + 回写)',
+    summary: '反馈模型实测表现(EMA 按 tier 分桶收敛;registry 不可变替换 + 回写);仅 admin 可写(session 身份 → SESSION_FORBIDDEN)',
     params: [
       { name: 'model', type: 'string', required: true, description: '模型名' },
       { name: 'tier', type: 'string', required: true, description: '档位(frontier/standard/fast 闭集)' },
@@ -221,7 +221,7 @@ export const API_OPERATIONS: readonly OperationDoc[] = [
       { name: 'task_type', type: 'string', required: false, description: '任务类型标注' },
       { name: 'budget_tier', type: 'string', required: false, description: '预算档位标注' },
     ],
-    result: '{model, tier, observed, samples, alpha_applied}',
+    result: '{model, tier, observed, samples, alpha_applied};session 身份 → SESSION_FORBIDDEN(-32014/403)',
   },
   {
     method: 'events.list',
