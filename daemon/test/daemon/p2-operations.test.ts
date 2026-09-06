@@ -297,6 +297,45 @@ describe('P2 接线:审批 RPC(人机入口)', () => {
     assert.ok(events.some((e) => e.type === 'approval.decided'));
   });
 
+  it('issue #4 回归:workflow 任务 agentId 为 <task>/<实例>,decide→grant 全链路闭环', async () => {
+    const handle = await start({ presets: { coder: coderPreset() }, runtime: stubRuntime() });
+    const taskId = resultOf(
+      await rpc(handle, 'workflow.run', {
+        workflow: { api: 'workflow/1.0', intent_ref: 'wf', nodes: [{ id: 'n1', preset: 'coder' }], outputs: [], feedback: [], evidence: [] },
+      }),
+    )['task_id'] as string;
+
+    // 任务级 agentId 必须是协议冻结的 <task>/<实例> 形态(裸 <taskId> 会让
+    // 拿它去 submit 的调用方在 decide→grant 撞 AGENT_ID_INVALID)。
+    const agentId = (await taskStatus(handle, taskId))['agentId'] as string;
+    assert.equal(agentId, `${taskId}/workflow`);
+
+    await handle.board.submit({
+      from: agentId,
+      reqId: 'req-wf-1',
+      cap: 'mcp:playwright',
+      reason: '需要截图验证',
+      scope: 'write',
+      duration: '2h',
+    });
+    await waitFor(async () => (await taskStatus(handle, taskId))['status'] === 'waiting_approval', '审批挂起');
+
+    const decided = resultOf(
+      await rpc(handle, 'approvals.decide', { req_id: 'req-wf-1', decision: 'granted', by: 'ops-1' }),
+    );
+    assert.equal(decided['decision'], 'granted');
+
+    // escalation 授予落事件流(grant.granted)+ grants.of manifest 可查。
+    const events = await allEvents(handle);
+    const granted = events.find((e) => e.type === 'grant.granted') as unknown as Record<string, unknown>;
+    assert.ok(granted, '应落 grant.granted 事件');
+    assert.equal((granted['payload'] as Record<string, unknown>)['source'], 'escalation:req-wf-1');
+    assert.equal((granted['principal'] as Record<string, unknown>)['task'], taskId);
+    const manifest = resultOf(await rpc(handle, 'grants.of', { agent_id: agentId }));
+    const grants = (manifest['manifest'] as Record<string, unknown>)['grants'] as Record<string, unknown>[];
+    assert.equal(grants[0]?.['source'], 'escalation:req-wf-1');
+  });
+
   it('重复定案 → REQ_UNKNOWN 域错误(-32000)', async () => {
     const handle = await start();
     await handle.board.submit({

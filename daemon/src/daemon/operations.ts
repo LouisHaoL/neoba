@@ -555,9 +555,14 @@ export class Operations {
     }
 
     const taskId = newTaskId(this.#ctx.now);
+    // 任务级 agentId 统一 <task>/<实例> 形态(协议 §3.3 冻结格式,capability/
+    // messenger 的 AGENT_ID_RE 同源):workflow 任务的实例段固定为 `workflow`
+    // (与 preset 前缀 `workflow:` 同源)。裸 <taskId> 会让拿着 task.status 的
+    // agent_id 去 approvals.submit 的调用方在 decide→grant 撞 AGENT_ID_INVALID
+    // (issue #4)。各节点的 agent 仍是引擎派的 <task>/<nodeId>,互不冲突。
     const record: TaskRecord = {
       taskId,
-      agentId: taskId,
+      agentId: `${taskId}/workflow`,
       tenant,
       session,
       intent: intent?.goal ?? workflow.intent_ref,
