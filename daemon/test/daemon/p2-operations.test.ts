@@ -6,7 +6,7 @@
  * runtime 全部用桩(NodeRuntime),不依赖真实基座。
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
@@ -124,6 +124,21 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 
 function allEvents(handle: DaemonHandle) {
   return handle.events.readByPrincipal({ tenant: 'default' });
+}
+
+/** 篡改 CAS 对象内容制造损坏(verify 重算哈希不匹配 → evidence_corrupt)。 */
+async function corruptCasObject(root: string, content: string): Promise<void> {
+  const objectsDir = join(root, 'objects');
+  const entries = await readdir(objectsDir, { recursive: true, withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const path = join(entry.parentPath, entry.name);
+    if ((await readFile(path, 'utf8')) === content) {
+      await writeFile(path, 'corrupted-payload');
+      return;
+    }
+  }
+  throw new Error(`未找到内容为 ${JSON.stringify(content)} 的 CAS 对象`);
 }
 
 // ---------------------------------------------------------------- 用例
@@ -252,7 +267,10 @@ describe('P2 接线:workflow.run 全链路', () => {
     const raised = resultOf(await rpc(handle, 'budget.raise', { task_id: taskId, limit_tokens: 1000 }));
     assert.equal(raised['raised'], true);
     await rpc(handle, 'task.resume', { task_id: taskId });
-    await waitFor(async () => (await taskStatus(handle, taskId))['status'] === 'completed', '续跑完成');
+    await waitFor(
+      async () => (await taskStatus(handle, taskId))['status'] === 'completed',
+      '续跑完成',
+    );
   });
 });
 
@@ -754,3 +772,163 @@ describe('M3 接线:per-session token 与越权', () => {
   });
 });
 
+
+// ---------------------------------------------------------------- issue #17 状态一致性回归
+
+describe('P2 接线:issue #17 引擎终态与 TaskStore 一致性', () => {
+  const USAGE_150 = {
+    ts: new Date().toISOString(),
+    agent: null,
+    event: 'usage' as const,
+    tokens_in: 150,
+    tokens_out: 0,
+    cost_estimate: null,
+  };
+
+  it('#17 budget_paused 后 task.cancel:终态 cancelled,node.failed(cancelled) 落账,重放一致', async () => {
+    const runtime = stubRuntime({
+      n1: () => ({ exitCode: 0, events: [USAGE_150], artifacts: [{ name: 'code', payload: 'x' }] }),
+    });
+    const stateDir = await mkdtemp(join(tmpdir(), 'neoba-p2-i17-cancel-'));
+    roots.push(stateDir);
+    const first = await start({ stateDir, presets: { coder: coderPreset() }, runtime });
+    const taskId = resultOf(
+      await rpc(first, 'workflow.run', {
+        workflow: { api: 'workflow/1.0', intent_ref: 'wf', nodes: [{ id: 'n1', preset: 'coder' }], outputs: [], feedback: [], evidence: [] },
+        budget: { limit_tokens: 100 },
+      }),
+    )['task_id'] as string;
+
+    await waitFor(async () => (await taskStatus(first, taskId))['status'] === 'paused', '预算挂起');
+    // 修复前:cancel 只 gate.abort(),#loop 已退出无人消费 —— 任务永远 paused
+    assert.equal(resultOf(await rpc(first, 'task.cancel', { task_id: taskId }))['cancelled'], true);
+    await waitFor(async () => (await taskStatus(first, taskId))['status'] === 'cancelled', '取消落定');
+    assert.ok(
+      (await allEvents(first)).some(
+        (e) => e.type === 'node.failed' && (e.payload as { reason?: string }).reason === 'cancelled',
+      ),
+      'node.failed(cancelled) 落账',
+    );
+    await first.stop();
+    handles.pop();
+
+    const second = await start({ stateDir, presets: { coder: coderPreset() }, runtime });
+    handles.pop();
+    handles.push(second);
+    assert.equal((await taskStatus(second, taskId))['status'], 'cancelled', '重放后仍 cancelled');
+  });
+
+  it('#17 证据损坏:任务 failed 且 node.failed(evidence_corrupt) 落账,重放一致', async () => {
+    const testEntered = deferred();
+    const releaseTest = deferred();
+    const runtime = stubRuntime({
+      report: () => {
+        testEntered.resolve();
+        return releaseTest.promise.then(
+          (): RuntimeResult => ({ exitCode: 0, events: [], artifacts: [{ name: 'code', payload: 'artifact of report' }] }),
+        );
+      },
+    });
+    const stateDir = await mkdtemp(join(tmpdir(), 'neoba-p2-i17-corrupt-'));
+    roots.push(stateDir);
+    const first = await start({ stateDir, presets: { coder: coderPreset() }, runtime });
+    // 三节点:impl → test → report。证据声明在 test 上(PlanCheck 要求证据
+    // 覆盖 required 输出);report 在飞挂住时篡改 test 的 CAS 对象 —— 全节点
+    // 完成后的终检 verify 重算哈希不匹配 → evidence_corrupt。
+    const taskId = resultOf(
+      await rpc(first, 'workflow.run', {
+        workflow: {
+          api: 'workflow/1.0',
+          intent_ref: 'wf',
+          nodes: [
+            { id: 'impl', preset: 'coder' },
+            { id: 'test', preset: 'coder', inputs: [{ from: 'impl.outputs.code' }] },
+            { id: 'report', preset: 'coder', inputs: [{ from: 'test.outputs.code' }] },
+          ],
+          outputs: [{ from: 'test.outputs.code', required: true }],
+          feedback: [],
+          evidence: [{ node: 'test', artifact: 'code', must_exist: true, sha256_recorded: true }],
+        },
+      }),
+    )['task_id'] as string;
+
+    await testEntered.promise;
+    await waitFor(async () => {
+      const events = await allEvents(first);
+      return events.some(
+        (e) => e.type === 'node.completed' && (e.payload as { nodeId?: string }).nodeId === 'test',
+      );
+    }, 'test 完成(产物已进 CAS)');
+    await corruptCasObject(join(stateDir, 'artifacts'), 'artifact of test');
+    releaseTest.resolve();
+
+    // 修复前:终检失败只经返回值表达,TaskStore 由 node.completed 驱动永远 completed
+    await waitFor(async () => (await taskStatus(first, taskId))['status'] === 'failed', '证据损坏落 failed');
+    assert.ok(
+      (await allEvents(first)).some(
+        (e) => e.type === 'node.failed' && (e.payload as { reason?: string }).reason === 'evidence_corrupt',
+      ),
+      'node.failed(evidence_corrupt) 落账',
+    );
+    await first.stop();
+    handles.pop();
+
+    const second = await start({ stateDir, presets: { coder: coderPreset() }, runtime });
+    handles.pop();
+    handles.push(second);
+    assert.equal((await taskStatus(second, taskId))['status'], 'failed', '重放后仍 failed');
+  });
+
+  it('#17 可重试节点 crash:重试耗尽终态 failed;重跑成功终态 completed(重放一致,无翻转)', async () => {
+    const retryWorkflow = {
+      api: 'workflow/1.0',
+      intent_ref: 'wf',
+      nodes: [{ id: 'n1', preset: 'coder', retry: { max: 1, on: ['crash'] } }],
+      outputs: [],
+      feedback: [],
+      evidence: [],
+    };
+
+    // 重试耗尽:两次都 crash → 终态 failed,重放一致
+    const crashing = stubRuntime({ n1: () => ({ exitCode: 1, events: [], artifacts: [] }) });
+    const stateDir = await mkdtemp(join(tmpdir(), 'neoba-p2-i17-retry-'));
+    roots.push(stateDir);
+    const first = await start({ stateDir, presets: { coder: coderPreset() }, runtime: crashing });
+    const failId = resultOf(await rpc(first, 'workflow.run', { workflow: retryWorkflow }))['task_id'] as string;
+    // 等第二次失败事件(attempt 2)落账:这是该任务的最后一次失败,其后引擎
+    // 只剩同步收尾、无再派发 —— 在此之前任务状态会先经过 attempt 1 的中间
+    // failed 形态,直接等 status 会与引擎重试竞速,stop 掉仍在飞的引擎。
+    await waitFor(async () => {
+      const events = await allEvents(first);
+      return events.some(
+        (e) => e.type === 'node.failed' && (e.payload as { attempt?: number }).attempt === 2,
+      );
+    }, '重试耗尽(第二次失败事件落账)');
+    await waitFor(async () => (await taskStatus(first, failId))['status'] === 'failed', '任务终态 failed');
+    await first.stop();
+    handles.pop();
+    const replayed = await start({ stateDir, presets: { coder: coderPreset() }, runtime: crashing });
+    handles.pop();
+    handles.push(replayed);
+    assert.equal((await taskStatus(replayed, failId))['status'], 'failed', '重放后仍 failed');
+    await replayed.stop();
+    handles.pop();
+
+    // 首跑 crash、重试成功 → 终态 completed(修复前 failed→completed 翻转)
+    const flaky = stubRuntime({
+      n1: (_ctx, call) =>
+        call === 1
+          ? { exitCode: 1, events: [], artifacts: [] }
+          : { exitCode: 0, events: [], artifacts: [{ name: 'code', payload: 'x' }] },
+    });
+    const handle = await start({ presets: { coder: coderPreset() }, runtime: flaky });
+    const okId = resultOf(await rpc(handle, 'workflow.run', { workflow: retryWorkflow }))['task_id'] as string;
+    await waitFor(async () => (await taskStatus(handle, okId))['status'] === 'completed', '重试成功落 completed');
+    assert.ok(
+      (await allEvents(handle)).some(
+        (e) => e.type === 'node.started' && (e.payload as { attempt?: number }).attempt === 2,
+      ),
+      '确实发生了重试',
+    );
+  });
+});

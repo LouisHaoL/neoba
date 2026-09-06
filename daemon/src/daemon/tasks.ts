@@ -9,11 +9,13 @@
  * P2 扩展任务状态机:workflow.run 的任务按事件流推进
  *   created → running → (waiting_approval | paused)? → completed / failed / cancelled
  * 映射(重放与实时共用 applyTaskEvent,保证两态一致):
- *   node.started                → running(已有记录则只推进状态,不覆盖业务字段)
- *   node.completed              → completed(工作流任务须全部节点完成,见下)
+ *   node.started                → running(已有记录则只推进状态,不覆盖业务字段;
+ *                                 failed 且新 attempt 更大 = 引擎重试,拨回 running)
+ *   node.completed              → completed(工作流任务须全部节点完成,见下;
+ *                                 已终态且不同则拒绝覆盖并告警 —— 终态闸)
  *   node.failed(budget_paused)  → paused(预算熔断挂起,续预算后 resume)
  *   node.failed(cancelled)      → cancelled
- *   node.failed(其它)           → failed
+ *   node.failed(其它)           → failed(记录 attempt,供重试回拨判定)
  *   approval.requested          → waiting_approval(有人工审批单挂着)
  *   budget.exceeded             → paused
  */
@@ -51,14 +53,30 @@ export class TaskStore {
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly manifests = new Map<string, GrantManifest>();
   private readonly doneNodes = new Map<string, Set<string>>();
+  /** 任务最近一次 node.failed 的 attempt(重试回拨 running 的判定依据,#17)。 */
+  private readonly failedAttempts = new Map<string, number>();
 
   upsert(record: TaskRecord): void {
     this.tasks.set(record.taskId, record);
   }
 
-  markRunning(taskId: string): void {
+  /**
+   * 拨回 running。issue #17:可重试节点失败会先落 node.failed(临时 failed),
+   * 引擎重试派发的 node.started 必须能把 failed 拨回 running —— 否则重跑
+   * 成功后的 markCompleted 无条件覆盖会造成 failed→completed 终态翻转。
+   * 仅当新 attempt 大于已记录的失败 attempt(确属重试/回打重跑)才回拨;
+   * completed / cancelled 仍不可逆,attempt 缺省(旧事件)不回拨。
+   */
+  markRunning(taskId: string, attempt = 0): void {
     const record = this.tasks.get(taskId);
-    if (record !== undefined && isTransitional(record.status)) record.status = 'running';
+    if (record === undefined) return;
+    if (isTransitional(record.status)) {
+      record.status = 'running';
+      return;
+    }
+    if (record.status === 'failed' && attempt > (this.failedAttempts.get(taskId) ?? 0)) {
+      record.status = 'running';
+    }
   }
 
   markWaitingApproval(taskId: string): void {
@@ -73,15 +91,34 @@ export class TaskStore {
 
   markCompleted(taskId: string): void {
     const record = this.tasks.get(taskId);
-    if (record !== undefined) record.status = 'completed';
+    if (record === undefined) return;
+    if (!isTransitional(record.status)) {
+      if (record.status !== 'completed') {
+        // 终态闸(issue #17):failed / cancelled 已是终态,completed 不得
+        // 覆盖(否则 failed→completed 翻转)。拒绝并告警,保留原终态。
+        console.error(
+          `[tasks] 任务 ${taskId} 已终态 ${record.status},拒绝被 completed 覆盖(终态不可逆)`,
+        );
+      }
+      return;
+    }
+    record.status = 'completed';
   }
 
-  markFailed(taskId: string, error: string): void {
+  markFailed(taskId: string, error: string, attempt = 0): void {
     const record = this.tasks.get(taskId);
-    if (record !== undefined) {
-      record.status = 'failed';
-      record.error = error;
+    if (record === undefined) return;
+    if (record.status === 'cancelled') {
+      // 终态闸(issue #17):cancelled 是操作者显式决策的终态,迟到的失败
+      // 事件(或引擎异常兜底)不得翻转;completed 允许被 failed 覆盖 ——
+      // 终检失败(evidence_missing/corrupt、output_unresolved)发生时全部
+      // 节点已 completed,引擎的失败裁决是更权威的终态;failed 覆盖 failed
+      // 仅刷新错误信息。
+      return;
     }
+    record.status = 'failed';
+    record.error = error;
+    this.failedAttempts.set(taskId, attempt);
   }
 
   markCancelled(taskId: string, error: string | null = null): void {
@@ -237,6 +274,7 @@ export function applyTaskEvent(store: TaskStore, ev: Event): void {
   const extra = asRecord(payload['extra']);
   switch (ev.type) {
     case 'node.started': {
+      const attempt = typeof payload['attempt'] === 'number' ? payload['attempt'] : 0;
       const existing = store.get(task);
       if (existing === undefined) {
         store.upsert({
@@ -254,7 +292,7 @@ export function applyTaskEvent(store: TaskStore, ev: Event): void {
             : [],
         });
       } else {
-        store.markRunning(task);
+        store.markRunning(task, attempt);
       }
       break;
     }
@@ -276,12 +314,13 @@ export function applyTaskEvent(store: TaskStore, ev: Event): void {
     case 'node.failed': {
       const reason = typeof payload['reason'] === 'string' ? payload['reason'] : 'crash';
       const detail = typeof payload['detail'] === 'string' ? payload['detail'] : 'unknown';
+      const attempt = typeof payload['attempt'] === 'number' ? payload['attempt'] : 0;
       if (reason === 'budget_paused') {
         store.markPaused(task);
       } else if (reason === 'cancelled') {
         store.markCancelled(task, detail);
       } else {
-        store.markFailed(task, detail);
+        store.markFailed(task, detail, attempt);
       }
       break;
     }
