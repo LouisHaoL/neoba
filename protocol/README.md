@@ -133,6 +133,14 @@ validate(myDoc); // 顶层 oneOf 的 schema(handshake / grant-manifest / messagi
 14. **capability-registry / model-score-registry 的根类型归类**:决议表未列;暂按
     信封类(protocol+spec_version)处理,若定稿归文档类需加 api 字段。
 
+### 修订记录
+
+- **2026-09-06(#24)**:`handshake.schema.json` 的 `sessionInitRequest`(顶层信封)与
+  `clientCapabilities` 移除 `additionalProperties: false`。原冻结与 §3.0 规则 1
+  ("接收方必须忽略未知字段;仅新增字段/新增可选能力 = minor")自相矛盾,实现一直按
+  规则 1 走(忽略未知键);本次裁决:按设计文档走,握手请求信封与能力声明层允许扩展
+  字段,`params`/`principal` 等字段级定义维持最小冻结。集成方无所适从的问题就此销号。
+
 ## 版本
 
 - 冻结依据:`docs/neoba-design-v0.2.md`(2026-09-04,含 v0.2 变更摘要 13 项)

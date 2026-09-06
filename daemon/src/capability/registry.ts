@@ -18,6 +18,7 @@ import {
   checkPattern,
   isNonEmptyString,
   isPlainObject,
+  unknownFields,
 } from './validation.ts';
 import type {
   CapKind,
@@ -31,6 +32,18 @@ import type {
 export const PROTOCOL = '1.0';
 export const SPEC_VERSION = '1.0';
 
+/** capability-registry.schema.json 冻结的键集(additionalProperties: false)。 */
+const ROOT_KEYS = ['protocol', 'spec_version', 'capabilities'] as const;
+const ENTRY_KEYS = [
+  'id',
+  'kind',
+  'description',
+  'tools',
+  'risk_level',
+  'grantable_scopes',
+  'path_template',
+] as const;
+
 /** 解析并校验注册表 JSON 文档(结构按 schema;一次报出全部问题)。 */
 export function loadCapabilityRegistry(raw: unknown): LoadedRegistry {
   const issues = new Issues();
@@ -39,6 +52,8 @@ export function loadCapabilityRegistry(raw: unknown): LoadedRegistry {
   }
   issues.addIf(raw['protocol'] !== PROTOCOL, 'protocol', '必须为 "1.0"');
   checkPattern(issues, 'spec_version', raw['spec_version'], SPEC_VERSION_RE, '\\d+.\\d+(.\\d+)?');
+  // 未知字段 fail-fast(#24):带 typo 的键(如 riskLevel)必须报错而非静默丢弃。
+  unknownFields(raw, ROOT_KEYS, 'root', issues);
 
   const items = raw['capabilities'];
   if (!Array.isArray(items)) {
@@ -55,6 +70,7 @@ export function loadCapabilityRegistry(raw: unknown): LoadedRegistry {
       issues.add(field, '必须是对象');
       continue;
     }
+    unknownFields(item, ENTRY_KEYS, field, issues);
     const idOk = checkPattern(issues, `${field}.id`, item['id'], CAP_ID_RE, '<namespace>:<name>');
     if (idOk) {
       const id = item['id'] as string;
