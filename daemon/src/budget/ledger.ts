@@ -42,6 +42,8 @@ export class BudgetLedger {
   #observed = 0;
   #softFired = false;
   #hardFired = false;
+  /** emit 串行链:所有事件按发起序(= 同步段入队序)落盘,杜绝并行 await 插队(#22)。 */
+  #emitting: Promise<void> = Promise.resolve();
 
   constructor(config: BudgetConfig, options: BudgetLedgerOptions) {
     if (!Number.isInteger(config.limitTokens) || config.limitTokens < 0) {
@@ -85,11 +87,15 @@ export class BudgetLedger {
     const before = this.level;
     this.#observed += tokensIn + tokensOut;
     const after = this.level;
+    // 同步段内决定 crossed 集合并按档位序构造事件、置位 flags、全部入队(#22):
+    // 若边构造边 await emit,先越 soft 的 record 挂起在 warning 上,后越 hard 的
+    // 并发 record 会抢先完成 exceeded → 事件序倒挂(计数本身正确)。
     const crossed: ('soft' | 'hard')[] = [];
+    const events: BudgetEmitInput[] = [];
     if (before === 'ok' && after !== 'ok' && !this.#softFired) {
       this.#softFired = true;
       crossed.push('soft');
-      await this.#emit({
+      events.push({
         type: 'budget.warning',
         payload: { level: 'soft', limitTokens: this.softTokens, observedTokens: this.#observed },
       });
@@ -97,7 +103,7 @@ export class BudgetLedger {
     if (after === 'hard' && !this.#hardFired) {
       this.#hardFired = true;
       crossed.push('hard');
-      await this.#emit({
+      events.push({
         type: 'budget.exceeded',
         payload: {
           level: 'hard',
@@ -107,12 +113,28 @@ export class BudgetLedger {
         },
       });
     }
+    // 同一同步段内全部挂上串行链再统一等待:落盘序 = 入队序 = warning 先于 exceeded。
+    const runs = events.map((event) => this.#emitOrdered(event));
+    for (const run of runs) await run;
     return {
       observedTokens: this.#observed,
       crossed,
       level: after,
       ...(after === 'hard' ? { action: 'paused' as const } : {}),
     };
+  }
+
+  /**
+   * emit 串行化:事件链式执行,后入队的不会在先入队的 await 窗口内插队完成;
+   * 单点 emit 失败不阻断链上后续事件。
+   */
+  #emitOrdered(event: BudgetEmitInput): Promise<void> {
+    const run = this.#emitting.then(() => this.#emit(event));
+    this.#emitting = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   /**
