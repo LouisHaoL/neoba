@@ -12,6 +12,14 @@
  * 即写屏障,无需引擎侧索引:指针未换,旧对象全部在用;指针换上,新对象
  * 已先落 CAS。孤儿 = 在盘对象 − in-use 集。
  *
+ * 竞态防线(issue #13):publish 是「先写 CAS 对象、后 rename 指针」,
+ * plan 的两趟快照(listManifests → listObjects)与删除之间若有新指针落下,
+ * 其对象会被误判孤儿。因此 collect 在删除前对每个待删 sha 二次复核指针
+ * 可达性(repo.recheckOrphans,重扫当前全部指针),仍不可达才交给删除;
+ * 到期 manifest 的删除也携带 plan 快照里的期望 version/publishedAt,
+ * 并发重发布出的新指针不会被盲删。复核把误删窗口压缩到第二次扫描之后
+ * 的一瞬(与 CLI prune / 其他进程的跨进程互斥不在本层解决)。
+ *
  * plan 是纯决策(不碰磁盘外的副作用),可 dry-run 单测;collect 组合
  * repository 的扫描/删除原语执行 plan,并把 plan 摘要落 `artifact.gc` 事件。
  *
@@ -114,20 +122,33 @@ export interface GcCollectContext {
   readonly principal?: EventInput<'artifact.gc'>['principal'];
 }
 
+/** collect 的输入仓库面:ArtifactRepository 的子集,便于测试替身。
+ * recheckOrphans 是孤儿删除前的二次复核(issue #13);deleteManifest 的
+ * 可选期望版本用于防并发重发布后的盲删。 */
+export interface GcRepository {
+  readonly listManifests: ArtifactRepository['listManifests'];
+  readonly listObjects: ArtifactRepository['listObjects'];
+  readonly deleteManifest: ArtifactRepository['deleteManifest'];
+  readonly removeObjects: ArtifactRepository['removeObjects'];
+  readonly recheckOrphans: ArtifactRepository['recheckOrphans'];
+}
+
 export interface GcCollectResult {
   readonly plan: GcPlan;
   /** 实际删除的 manifest 数(id 列表见 plan.expiredManifests)。 */
   readonly removedManifests: number;
   /** 实际删除的孤儿对象数。 */
   readonly removedObjects: number;
+  /** 二次复核救回的孤儿对象数(plan 判孤儿、复核时已有指针可达)。 */
+  readonly rescuedObjects: number;
 }
 
 /**
- * 执行一轮自动 GC:plan → 删到期 manifest(对象不动)→ 清孤儿对象 →
- * 落 artifact.gc 事件(payload = plan 摘要)。
+ * 执行一轮自动 GC:plan → 删到期 manifest(带期望版本,对象不动)→
+ * 孤儿对象二次复核后清扫 → 落 artifact.gc 事件(payload = plan 摘要)。
  */
 export async function collectArtifactGc(
-  repo: ArtifactRepository,
+  repo: GcRepository,
   ctx: GcCollectContext,
 ): Promise<GcCollectResult> {
   const now = (ctx.now ?? (() => new Date()))().toISOString();
@@ -135,11 +156,30 @@ export async function collectArtifactGc(
   const objects = await repo.listObjects();
   const plan = planArtifactGc({ manifests, objects, now, isTerminal: ctx.isTerminal });
 
+  // 到期 manifest 删除携带 plan 快照的期望版本:plan 之后该路径若被并发
+  // publish 出新指针,deleteManifest 比对不匹配即跳过,不盲删新指针。
+  const listingById = new Map(manifests.map((m) => [m.id, m]));
   let removedManifests = 0;
   for (const id of plan.expiredManifests) {
-    if (await repo.deleteManifest(id)) removedManifests += 1;
+    const listing = listingById.get(id);
+    const removed = await repo.deleteManifest(
+      id,
+      listing === undefined
+        ? {}
+        : {
+            expectedVersion: listing.version,
+            expectedPublishedAt: listing.publishedAt,
+          },
+    );
+    if (removed) removedManifests += 1;
   }
-  const removedShas = await repo.removeObjects(plan.orphanedObjects);
+
+  // 孤儿删除前二次复核(issue #13):plan 的快照与此刻之间可能有 publish
+  // 落下新指针(先写 CAS 对象、后 rename 指针的窗口),重扫当前全部指针,
+  // 仍无指针可达的才交给删除。
+  const confirmedOrphans = await repo.recheckOrphans(plan.orphanedObjects);
+  const removedShas = await repo.removeObjects(confirmedOrphans);
+  const rescuedObjects = plan.orphanedObjects.length - confirmedOrphans.length;
 
   const payload: ArtifactGcPayload = {
     scanned: plan.scannedManifests,
@@ -149,6 +189,7 @@ export async function collectArtifactGc(
     removedManifests,
     removedObjects: removedShas.length,
     expiredManifests: plan.expiredManifests,
+    rescuedObjects,
   };
   if (ctx.emit !== undefined) {
     await ctx.emit({
@@ -166,6 +207,7 @@ export async function collectArtifactGc(
     plan,
     removedManifests,
     removedObjects: removedShas.length,
+    rescuedObjects,
   };
 }
 

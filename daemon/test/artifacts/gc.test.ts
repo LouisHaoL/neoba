@@ -6,6 +6,7 @@
  * 4. 非法 retention(盘上脏值)按 forever 处理,读路径不炸
  * 5. artifact.gc 事件落盘(payload = plan 摘要)
  * 6. collect 对损坏 manifest / 损坏对象容错
+ * 7. 竞态防线(#13):孤儿删除前二次复核、deleteManifest 带期望版本、并发重发布不盲删
  */
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -373,5 +374,166 @@ describe('GC collect(执行 + 事件落盘)', () => {
     assert.equal(result.removedManifests, 0);
     assert.ok(result.plan.orphanedObjects.length >= 1); // 篡改的孤儿对象按名清扫
     await assert.doesNotReject(repo.read(ns, 'n', 'good'));
+  });
+});
+
+// ---------------------------------------------------------------- 竞态防线(#13)
+
+describe('GC 竞态防线(#13):二次复核 + 版本校验', () => {
+  it('「对象已落盘、指针未落」窗口:plan 快照后指针落下,复核救回不误删', async () => {
+    const { repo } = await makeRepo();
+    // 造历史孤儿:发布后删指针,对象留在 CAS(等待被 dedup 复用)。
+    const victim = await repo.publish(ns, 'n', 'victim', 'race-body');
+    assert.ok(await repo.deleteManifest('acme/task-1/n/victim'));
+
+    // 包一层 listManifests:第一次扫描(plan 快照)返回时指针尚未落;
+    // 随后模拟 publish 的「rename 指针」落地(dedup 路径复用盘上孤儿对象)。
+    // recheckOrphans 走仓库内部重扫,不受此包装影响 —— 恰好构成竞态窗口。
+    const baseList = repo.listManifests.bind(repo);
+    let scanned = false;
+    repo.listManifests = async () => {
+      const listings = await baseList();
+      if (!scanned) {
+        scanned = true;
+        await repo.publish(
+          { tenant: ns.tenant, task: 'task-2' },
+          'n',
+          'rescued',
+          'race-body',
+        );
+      }
+      return listings;
+    };
+
+    const result = await collectArtifactGc(repo, { isTerminal: () => true });
+    // plan 仍按快照判它孤儿,但删除前复核发现指针已可达 → 救回,不删。
+    assert.deepEqual(result.plan.orphanedObjects, [victim.rootSha256]);
+    assert.equal(result.rescuedObjects, 1);
+    assert.equal(result.removedObjects, 0);
+    const ns2 = { tenant: ns.tenant, task: 'task-2' };
+    assert.equal(
+      (await repo.resolve(ns2, 'n', 'rescued'))?.rootSha256,
+      victim.rootSha256,
+    );
+    await assert.doesNotReject(repo.read(ns2, 'n', 'rescued'));
+  });
+
+  it('prune 两轮确认:reconcile 快照后指针落下,复核救回不删', async () => {
+    const { repo } = await makeRepo();
+    const victim = await repo.publish(ns, 'n', 'victim', 'prune-race');
+    assert.ok(await repo.deleteManifest('acme/task-1/n/victim'));
+
+    // 包一层 reconcile:对账快照返回后,模拟 publish 落下引用该对象的新指针。
+    const baseReconcile = repo.reconcile.bind(repo);
+    repo.reconcile = async () => {
+      const report = await baseReconcile();
+      await repo.publish(
+        { tenant: ns.tenant, task: 'task-2' },
+        'n',
+        'rescued',
+        'prune-race',
+      );
+      return report;
+    };
+
+    const removed = await repo.prune();
+    assert.deepEqual(removed, []); // 待删名单里的对象被第二轮复核救回
+    const ns2 = { tenant: ns.tenant, task: 'task-2' };
+    assert.equal(
+      (await repo.resolve(ns2, 'n', 'rescued'))?.rootSha256,
+      victim.rootSha256,
+    );
+    await assert.doesNotReject(repo.read(ns2, 'n', 'rescued'));
+  });
+
+  it('collect:plan 快照后到期路径被并发重发布,带期望版本跳过删除', async () => {
+    const { root, repo } = await makeRepo();
+    await repo.publish(ns, 'n', 'exp', 'old-body', {
+      retention: { mode: 'days', days: 7 },
+    });
+    await pokeManifest(root, ns.tenant, ns.task, 'n', 'exp', { ageDays: 10 });
+
+    // 包一层 listManifests:plan 拿到的是 version 1 的过期快照;
+    // 快照返回后模拟并发 publish 落下 version 2 新指针。
+    const baseList = repo.listManifests.bind(repo);
+    let scanned = false;
+    repo.listManifests = async () => {
+      const listings = await baseList();
+      if (!scanned) {
+        scanned = true;
+        await repo.publish(ns, 'n', 'exp', 'new-body', {
+          retention: { mode: 'days', days: 7 },
+        });
+      }
+      return listings;
+    };
+
+    const result = await collectArtifactGc(repo, { isTerminal: () => true });
+    // 期望 version 1 ≠ 盘上 version 2 → deleteManifest 跳过,新指针未被盲删。
+    assert.deepEqual(result.plan.expiredManifests, ['acme/task-1/n/exp']);
+    assert.equal(result.removedManifests, 0);
+    const ref = await repo.resolve(ns, 'n', 'exp');
+    assert.equal(ref?.version, 2);
+    await assert.doesNotReject(repo.read(ns, 'n', 'exp'));
+  });
+
+  it('deleteManifest 带版本校验:期望不匹配跳过,全匹配才删', async () => {
+    const { repo } = await makeRepo();
+    await repo.publish(ns, 'n', 'doc', 'v1');
+    const first = await repo.resolve(ns, 'n', 'doc');
+    assert.equal(first?.version, 1);
+    await repo.publish(ns, 'n', 'doc', 'v2'); // 并发重发布 → version 2
+
+    const id = 'acme/task-1/n/doc';
+    // 过期快照(version=1)不能删掉新指针。
+    assert.equal(
+      await repo.deleteManifest(id, {
+        expectedVersion: 1,
+        expectedPublishedAt: first?.publishedAt,
+      }),
+      false,
+    );
+    assert.equal((await repo.resolve(ns, 'n', 'doc'))?.version, 2);
+    // version 匹配但 publishedAt 不匹配 → 同样跳过。
+    assert.equal(
+      await repo.deleteManifest(id, {
+        expectedVersion: 2,
+        expectedPublishedAt: first?.publishedAt,
+      }),
+      false,
+    );
+    assert.equal((await repo.resolve(ns, 'n', 'doc'))?.version, 2);
+    // 全匹配 → 正常删除。
+    const current = await repo.resolve(ns, 'n', 'doc');
+    assert.ok(current);
+    assert.equal(
+      await repo.deleteManifest(id, {
+        expectedVersion: current.version,
+        expectedPublishedAt: current.publishedAt,
+      }),
+      true,
+    );
+    assert.equal(await repo.resolve(ns, 'n', 'doc'), null);
+  });
+
+  it('deleteManifest 带期望但指针损坏/已消失:保守跳过;不带期望保持幂等盲删', async () => {
+    const { root, repo } = await makeRepo();
+    await repo.publish(ns, 'n', 'doc', 'body');
+    const pointer = join(root, 'manifests', ns.tenant, ns.task, 'n', 'doc');
+    await writeFile(pointer, '{{{not-json'); // 指针损坏,无法比对版本
+
+    // 带期望:比对不了就保守跳过,绝不盲删。
+    assert.equal(
+      await repo.deleteManifest('acme/task-1/n/doc', { expectedVersion: 1 }),
+      false,
+    );
+    // 不带期望:保持旧语义(手工运维路径),损坏指针也按幂等盲删。
+    assert.equal(await repo.deleteManifest('acme/task-1/n/doc'), true);
+    // 已消失的路径:带期望返回 false(幂等),不带期望同样 false。
+    assert.equal(
+      await repo.deleteManifest('acme/task-1/n/doc', { expectedVersion: 1 }),
+      false,
+    );
+    assert.equal(await repo.deleteManifest('acme/task-1/n/doc'), false);
   });
 });
