@@ -105,29 +105,43 @@ export class WarmPool implements SandboxPool {
     return this.#pool.length;
   }
 
-  /** 取一个沙箱:池命中 restore 回热,池空冷拉;gate 语义在先(控并发)。 */
+  /**
+   * 取一个沙箱:池命中 restore 回热,池空冷拉;gate 语义在先(控并发)。
+   * 占槽之后任何一步(create 冷拉 / restore 回热)抛错都必须归还 gate 槽位,
+   * 否则失败累计 slots 次后 gate 永久 FIFO 排队,供给链路死锁(对齐 release()
+   * 的 finally #vacate 与 pool.ts withResourceGate 的「create 抛错即 release」)。
+   */
   async acquire(spec: SandboxSpec): Promise<PoolAcquireResult> {
     const key = slotKeyOf(spec.labels?.["neoba.task"], spec.labels?.["neoba.node"], `pool-${Math.random().toString(36).slice(2, 8)}`);
     const principal = principalOf(spec.labels ?? {}, DEFAULT_PRINCIPAL);
     await this.#occupy(key, principal);
-    if (!this.pooling) {
-      // 直通退化:接口照旧,池层零行为(docker/memory 路径)
-      return { handle: await this.#provider.create(spec), fromPool: false };
+    try {
+      if (!this.pooling) {
+        // 直通退化:接口照旧,池层零行为(docker/memory 路径)
+        return { handle: await this.#provider.create(spec), fromPool: false };
+      }
+      const sig = specSignature(spec);
+      const idx = this.#pool.findIndex((e) => e.key === sig);
+      if (idx >= 0) {
+        const entry = this.#pool.splice(idx, 1)[0]!;
+        // 回热失败:条目已 splice 出池,按池对孤儿引用的既有语义处理
+        // (同 drain():仅丢引用,snapshot 介质清理归后端/磁盘管理,§9 P4),
+        // 池内不残留引用;槽位由外层 catch 归还后原样重抛。
+        const handle = await this.#provider.restore(entry.ref);
+        // 回热实例继承本节点标签(gate key / 事件留痕按当前任务记账),
+        // 并带上规格签名供 release 回池匹配
+        handle.labels = { ...handle.labels, "neoba.pool-key": sig, ...(spec.labels ?? {}) };
+        return { handle, fromPool: true };
+      }
+      const handle = await this.#provider.create(spec);
+      // 冷拉实例同样锚定规格签名(release 回池时按此归位)
+      handle.labels = { ...handle.labels, "neoba.pool-key": sig };
+      return { handle, fromPool: false };
+    } catch (err) {
+      // 失败路径归还槽位(与 release 的 finally #vacate 同一约定)
+      await this.#vacate(key, principal);
+      throw err;
     }
-    const sig = specSignature(spec);
-    const idx = this.#pool.findIndex((e) => e.key === sig);
-    if (idx >= 0) {
-      const entry = this.#pool.splice(idx, 1)[0]!;
-      const handle = await this.#provider.restore(entry.ref);
-      // 回热实例继承本节点标签(gate key / 事件留痕按当前任务记账),
-      // 并带上规格签名供 release 回池匹配
-      handle.labels = { ...handle.labels, "neoba.pool-key": sig, ...(spec.labels ?? {}) };
-      return { handle, fromPool: true };
-    }
-    const handle = await this.#provider.create(spec);
-    // 冷拉实例同样锚定规格签名(release 回池时按此归位)
-    handle.labels = { ...handle.labels, "neoba.pool-key": sig };
-    return { handle, fromPool: false };
   }
 
   /**
