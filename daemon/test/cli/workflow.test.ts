@@ -1,7 +1,8 @@
 /**
  * CLI `neoba workflow check / export` 集成测试(§3.5g):
  * 本地查缺(预设/cap/模型准入清单)、--json 结构、三档导出落盘、
- * README/环境指引、检查不过拒绝导出、导出包移植后可再过 check。
+ * README/环境指引、检查不过拒绝导出、导出包移植后可再过 check;
+ * 模型准入口径对齐(issue #5):声明 model.tier + 未传 --models → fail。
  * 真实文件系统(mkdtemp),不连 daemon。
  */
 import assert from 'node:assert/strict';
@@ -123,6 +124,47 @@ const INTENT = {
   constraints: { forbidden_caps: ['mcp:prod-db'], allowed_models: ['*'] },
 };
 
+/** 含一个 tier=standard 可用候选的模型注册表(与 daemon 侧同格式)。 */
+const MODELS_OK = {
+  api: 'modelscore/1.0',
+  models: [{
+    protocol: '1.0',
+    spec_version: '1.0',
+    model: 'glm-4.7-air',
+    tier_fit: { fast: 0.9, standard: 0.6, heavy: 0.2 },
+    score: {
+      prior: { fast: 0.8, standard: 0.5, heavy: 0.2 },
+      observed: { fast: null, standard: null, heavy: null },
+      samples: { fast: 0, standard: 0, heavy: 0 },
+      dimensions: { quality: 0.8, success_rate: 0.8, cost_efficiency: 0.7 },
+    },
+    updated_at: '2026-09-05T00:00:00Z',
+  }],
+};
+
+/** 无 model 声明的预设 + 引用它的 workflow(验「无声明不强制 --models」)。 */
+const PLAIN_PRESET = {
+  api: 'preset/1.0',
+  name: 'plain/worker',
+  description: '无模型档位的普通执行者',
+  base: 'any',
+  baseline_grants: [{ cap: 'fs:workdir', scope: 'rw' }],
+  io_contracts: {
+    inputs: [],
+    outputs: [{ name: 'report', type: 'file:markdown' }],
+  },
+  escalation_policy: { auto_approve: [], require_approval: ['*'] },
+};
+
+const PLAIN_WORKFLOW = {
+  api: 'workflow/1.0',
+  intent_ref: 'intent-plain',
+  nodes: [{ id: 'work', preset: 'plain/worker' }],
+  outputs: [{ from: 'work.outputs.report', required: true }],
+  feedback: [],
+  evidence: [{ node: 'work', artifact: 'report', must_exist: true, sha256_recorded: true }],
+};
+
 async function writeFixtures(dir: string, workflow: object = WORKFLOW): Promise<{ presetsDir: string; workflowPath: string; intentPath: string }> {
   const presetsDir = join(dir, 'presets');
   await mkdirSure(presetsDir);
@@ -141,6 +183,13 @@ async function mkdirSure(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true });
 }
 
+/** 落一个模型注册表文件,返回路径。 */
+async function writeModels(dir: string, doc: object = MODELS_OK): Promise<string> {
+  const path = join(dir, 'models.json');
+  await writeFile(path, JSON.stringify(doc), 'utf8');
+  return path;
+}
+
 async function exists(path: string): Promise<boolean> {
   try {
     await access(path);
@@ -156,9 +205,10 @@ describe('cli:workflow check', () => {
   it('引用齐备 → 通过(退出 0);--intent 联动验收可追溯', async () => {
     const dir = await makeTmp('ok');
     const { presetsDir, workflowPath, intentPath } = await writeFixtures(dir);
+    const modelsPath = await writeModels(dir); // 预设声明 model.tier → check 需要 --models(issue #5)
     const io = makeIo();
     const code = await runCli(
-      ['workflow', 'check', workflowPath, '--presets', presetsDir, '--intent', intentPath],
+      ['workflow', 'check', workflowPath, '--presets', presetsDir, '--intent', intentPath, '--models', modelsPath],
       io,
       await makeDeps(),
     );
@@ -187,9 +237,10 @@ describe('cli:workflow check', () => {
   it('--json 输出 {ok, issues, preset_errors} 结构', async () => {
     const dir = await makeTmp('json');
     const { presetsDir, workflowPath } = await writeFixtures(dir);
+    const modelsPath = await writeModels(dir);
     const io = makeIo();
     const code = await runCli(
-      ['workflow', 'check', workflowPath, '--presets', presetsDir, '--json'],
+      ['workflow', 'check', workflowPath, '--presets', presetsDir, '--models', modelsPath, '--json'],
       io,
       await makeDeps(),
     );
@@ -220,26 +271,7 @@ describe('cli:workflow check', () => {
     assert.ok(io.outLines.join('\n').includes('model_admission_empty'));
 
     // 补上 tier=standard 的候选模型后,同一工作流通过。
-    await writeFile(
-      modelsPath,
-      JSON.stringify({
-        api: 'modelscore/1.0',
-        models: [{
-          protocol: '1.0',
-          spec_version: '1.0',
-          model: 'glm-4.7-air',
-          tier_fit: { fast: 0.9, standard: 0.6, heavy: 0.2 },
-          score: {
-            prior: { fast: 0.8, standard: 0.5, heavy: 0.2 },
-            observed: { fast: null, standard: null, heavy: null },
-            samples: { fast: 0, standard: 0, heavy: 0 },
-            dimensions: { quality: 0.8, success_rate: 0.8, cost_efficiency: 0.7 },
-          },
-          updated_at: '2026-09-05T00:00:00Z',
-        }],
-      }),
-      'utf8',
-    );
+    await writeFile(modelsPath, JSON.stringify(MODELS_OK), 'utf8');
     const io2 = makeIo();
     code = await runCli(
       ['workflow', 'check', workflowPath, '--presets', presetsDir, '--models', modelsPath],
@@ -247,6 +279,62 @@ describe('cli:workflow check', () => {
       await makeDeps(),
     );
     assert.equal(code, 0);
+  });
+
+  it('口径对齐(issue #5):声明 model.tier + 未传 --models → 退出 1 报 models_registry_missing', async () => {
+    const dir = await makeTmp('gate-text');
+    const { presetsDir, workflowPath } = await writeFixtures(dir);
+    const io = makeIo();
+    const code = await runCli(
+      ['workflow', 'check', workflowPath, '--presets', presetsDir],
+      io,
+      await makeDeps(),
+    );
+    assert.equal(code, 1);
+    const text = io.outLines.join('\n');
+    assert.ok(text.includes('models_registry_missing'));
+    assert.ok(text.includes('--models'));
+    assert.ok(text.includes('tier=standard'));
+    assert.ok(text.includes('检查通过') === false);
+  });
+
+  it('口径对齐(issue #5):--json 下 models_registry_missing 计入 issues 且 ok=false', async () => {
+    const dir = await makeTmp('gate-json');
+    const { presetsDir, workflowPath } = await writeFixtures(dir);
+    const io = makeIo();
+    const code = await runCli(
+      ['workflow', 'check', workflowPath, '--presets', presetsDir, '--json'],
+      io,
+      await makeDeps(),
+    );
+    assert.equal(code, 1);
+    const parsed = JSON.parse(io.outLines[0] ?? '{}') as {
+      ok: boolean;
+      issues: { code: string; message: string }[];
+    };
+    assert.equal(parsed.ok, false);
+    const gate = parsed.issues.filter((i) => i.code === 'models_registry_missing');
+    assert.equal(gate.length, 1);
+    assert.ok(gate[0]?.message.includes('--models'));
+  });
+
+  it('无 model 声明 + 未传 --models → 维持过检(现状不回归)', async () => {
+    const dir = await makeTmp('gate-plain');
+    const presetsDir = join(dir, 'presets');
+    await mkdirSure(presetsDir);
+    await writeFile(join(presetsDir, 'plain__worker.json'), JSON.stringify(PLAIN_PRESET), 'utf8');
+    const workflowPath = join(dir, 'workflow.json');
+    await writeFile(workflowPath, JSON.stringify(PLAIN_WORKFLOW), 'utf8');
+    const io = makeIo();
+    const code = await runCli(
+      ['workflow', 'check', workflowPath, '--presets', presetsDir],
+      io,
+      await makeDeps(),
+    );
+    assert.equal(code, 0);
+    const text = io.outLines.join('\n');
+    assert.ok(text.includes('检查通过'));
+    assert.ok(text.includes('models_registry_missing') === false);
   });
 
   it('预设目录里有坏 JSON → 报 ⚠ 且退出 1,不阻断其它预设加载', async () => {
@@ -329,10 +417,12 @@ describe('cli:workflow export', () => {
     assert.equal(grants.grants.length, 4);
     assert.ok(grants.grants.some((g) => g.preset === 'e2e-tester' && g.cap === 'mcp:playwright'));
 
-    // 移植后核验:只带导出包自带的预设目录,check 应通过。
+    // 移植后核验:只带导出包自带的预设目录,check 应通过
+    // (导出包预设声明 model.tier → 需随包给 --models,issue #5 口径)。
+    const modelsPath = await writeModels(dir);
     const io2 = makeIo();
     code = await runCli(
-      ['workflow', 'check', join(out, 'workflow.json'), '--presets', join(out, 'presets')],
+      ['workflow', 'check', join(out, 'workflow.json'), '--presets', join(out, 'presets'), '--models', modelsPath],
       io2,
       deps,
     );

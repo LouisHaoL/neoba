@@ -317,7 +317,7 @@ evidence:                          # 防编造(借鉴 required_workspace_files +
 **(f) 预算执行(v0.2 新增)**:daemon 为每个 task 维护 budget ledger,聚合 §3.6 usage 事件;soft limit(默认 80%)→ 发 warning 事件;hard limit → **pause 节点 + 升级主控**(续预算或终止)。token 计量语义 = "sidecar 尽力上报 + daemon 估算硬切",不是精确计费。
 
 **(g) 可移植性与导出(v0.2 补充)**:编排按名字引用外部实体(preset / cap / secret),名字**只在本地解析**,不承诺跨部署语义一致——但可移植性靠"检查 + 导出"支持,不靠"是否移植"的状态判断(本机工具库同样会变,所以**每次都查**才是对的,不引入设备 ID 这类脆弱状态):
-- **workflow check 常开**:引用解析本来就由 PlanCheck 常开执行;另提供显式入口 `neoba workflow check`,对任意 workflow 文件输出本地缺失清单(缺哪个 preset / cap / 模型准入不通过),移植前后各跑一次即可;
+- **workflow check 常开**:引用解析本来就由 PlanCheck 常开执行;另提供显式入口 `neoba workflow check`,对任意 workflow 文件输出本地缺失清单(缺哪个 preset / cap / 模型准入不通过),移植前后各跑一次即可。模型准入口径与 daemon 对齐(issue #5):workflow 存在声明 `model.tier` 的节点而未给 `--models` 注册表时,check 报 `models_registry_missing` 且退出非 0;无 model 声明则不强制;
 - **三档导出**(`neoba workflow export --level minimal|brief|full`):
 
 | 档位 | 内容 |

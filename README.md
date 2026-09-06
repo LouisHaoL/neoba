@@ -40,7 +40,7 @@ docs/       设计文档
 | P4 · M7:microsandbox(Firecracker microVM)后端 + provider 工厂(memory/docker/microsandbox)+ warm pool(snapshot 回热,与 ResourceGate 共槽)+ 镜像配置注入 | ✅ |
 | 一致性测试:全仓 649/649(golden 01–08 零漂移回归) | ✅ |
 
-运行示例:`neoba workflow check presets/examples/workflow.json --presets presets/examples --intent presets/examples/intent.json`
+运行示例:`neoba workflow check presets/examples/workflow.json --presets presets/examples --intent presets/examples/intent.json`。示例预设声明了 `model.tier`,请追加 `--models <模型注册表.json>`(口径与 daemon 一致:声明 model.tier 的工作流 check 时不传 `--models` 会报 `models_registry_missing` 且退出非 0,见 issue #5)。
 
 约束:TS 只用可剥离语法子集(无 enum/namespace/参数属性),类型导入用 `import type`,相对导入带 `.ts` 后缀——保证 `node` 直接执行,无构建步骤。
 
