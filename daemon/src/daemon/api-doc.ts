@@ -48,11 +48,11 @@ const PRINCIPAL_PARAMS: readonly OperationParamDoc[] = [
 export const API_OPERATIONS: readonly OperationDoc[] = [
   {
     method: 'session.init',
-    summary: '会话握手:校验 protocol/role,登记活跃会话;配置 token 注册表时签发会话 token(明文只出现一次)',
+    summary: '会话握手:校验 protocol/role,登记活跃会话;配置 token 注册表时签发会话 token(明文只出现一次)。session token 调用方 principal.tenant 必须等于绑定 tenant(#9),admin 不受限',
     params: [
       { name: 'protocol', type: 'string', required: true, description: '协议版本,如 "1.0"' },
       { name: 'role', type: 'string', required: true, description: '会话角色,如 orchestrator' },
-      { name: 'principal', type: 'object', required: true, description: '{tenant, session} 二元组' },
+      { name: 'principal', type: 'object', required: true, description: '{tenant, session} 二元组;session token 调用方 tenant 必须与 token 绑定一致' },
       { name: 'harness', type: 'string', required: false, description: '主控 harness 标识' },
       { name: 'capabilities', type: 'object', required: false, description: '客户端能力声明' },
     ],
