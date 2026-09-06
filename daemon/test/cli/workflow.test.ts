@@ -2,7 +2,8 @@
  * CLI `neoba workflow check / export` 集成测试(§3.5g):
  * 本地查缺(预设/cap/模型准入清单)、--json 结构、三档导出落盘、
  * README/环境指引、检查不过拒绝导出、导出包移植后可再过 check;
- * 模型准入口径对齐(issue #5):声明 model.tier + 未传 --models → fail。
+ * 模型准入口径对齐(issue #5):声明 model.tier + 未传 --models → fail;
+ * export 门禁与 check 同口径(#25):缺 --models 时同样拒导,坏包不出门。
  * 真实文件系统(mkdtemp),不连 daemon。
  */
 import assert from 'node:assert/strict';
@@ -371,10 +372,11 @@ describe('cli:workflow export', () => {
   it('minimal 档:workflow/caps/README 三件套,无 manifest/预设', async () => {
     const dir = await makeTmp('exp-min');
     const { presetsDir, workflowPath } = await writeFixtures(dir);
+    const modelsPath = await writeModels(dir); // 预设声明 model.tier → export 需要 --models(#25)
     const out = join(dir, 'bundle');
     const io = makeIo();
     const code = await runCli(
-      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--level', 'minimal', '--out', out],
+      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--models', modelsPath, '--level', 'minimal', '--out', out],
       io,
       await makeDeps(),
     );
@@ -393,10 +395,11 @@ describe('cli:workflow export', () => {
   it('full 档:预设文件/基线授予/环境指引齐备;导出包可再过 check(移植后核验)', async () => {
     const dir = await makeTmp('exp-full');
     const { presetsDir, workflowPath } = await writeFixtures(dir);
+    const modelsPath = await writeModels(dir); // 预设声明 model.tier → export 需要 --models(#25)
     const out = join(dir, 'bundle');
     const deps = await makeDeps();
     let code = await runCli(
-      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--level', 'full', '--out', out],
+      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--models', modelsPath, '--level', 'full', '--out', out],
       makeIo(),
       deps,
     );
@@ -419,7 +422,6 @@ describe('cli:workflow export', () => {
 
     // 移植后核验:只带导出包自带的预设目录,check 应通过
     // (导出包预设声明 model.tier → 需随包给 --models,issue #5 口径)。
-    const modelsPath = await writeModels(dir);
     const io2 = makeIo();
     code = await runCli(
       ['workflow', 'check', join(out, 'workflow.json'), '--presets', join(out, 'presets'), '--models', modelsPath],
@@ -448,10 +450,11 @@ describe('cli:workflow export', () => {
   it('--level 非法 → 用法错误;--json 输出导出回执', async () => {
     const dir = await makeTmp('exp-json');
     const { presetsDir, workflowPath } = await writeFixtures(dir);
+    const modelsPath = await writeModels(dir); // 预设声明 model.tier → export 需要 --models(#25)
     const deps = await makeDeps();
     const io = makeIo();
     let code = await runCli(
-      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--level', 'mega', '--out', join(dir, 'b1')],
+      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--models', modelsPath, '--level', 'mega', '--out', join(dir, 'b1')],
       io,
       deps,
     );
@@ -460,7 +463,7 @@ describe('cli:workflow export', () => {
     const out = join(dir, 'b2');
     const io2 = makeIo();
     code = await runCli(
-      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--level', 'brief', '--out', out, '--json'],
+      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--models', modelsPath, '--level', 'brief', '--out', out, '--json'],
       io2,
       deps,
     );
@@ -483,5 +486,83 @@ describe('cli:workflow export', () => {
     const code = await runCli(['--help'], io, await makeDeps());
     assert.equal(code, 0);
     assert.ok(io.outLines.join('\n').includes('workflow'));
+  });
+});
+
+// ------------------------------------------------------- export models 门禁(#25)
+
+describe('cli:workflow export models 门禁(#25)', () => {
+  it('声明 model.tier + 无 --models → 拒绝导出(退出 1)报 models_registry_missing,不落盘', async () => {
+    const dir = await makeTmp('exp-gate-text');
+    const { presetsDir, workflowPath } = await writeFixtures(dir);
+    const out = join(dir, 'bundle');
+    const io = makeIo();
+    const code = await runCli(
+      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--level', 'full', '--out', out],
+      io,
+      await makeDeps(),
+    );
+    assert.equal(code, 1);
+    const text = io.errLines.join('\n');
+    assert.ok(text.includes('models_registry_missing'));
+    assert.ok(text.includes('--models'));
+    assert.ok(text.includes('拒绝导出'));
+    assert.equal(await exists(out), false);
+  });
+
+  it('--json 下同样拒导,issues 含 models_registry_missing 且 ok=false', async () => {
+    const dir = await makeTmp('exp-gate-json');
+    const { presetsDir, workflowPath } = await writeFixtures(dir);
+    const out = join(dir, 'bundle');
+    const io = makeIo();
+    const code = await runCli(
+      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--level', 'brief', '--out', out, '--json'],
+      io,
+      await makeDeps(),
+    );
+    assert.equal(code, 1);
+    assert.equal(io.outLines.length, 0);
+    const parsed = JSON.parse(io.errLines[0] ?? '{}') as {
+      ok: boolean;
+      issues: { code: string }[];
+    };
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.issues.filter((i) => i.code === 'models_registry_missing').length, 1);
+    assert.equal(await exists(out), false);
+  });
+
+  it('带 --models → 同一输入正常出包(与 check 口径一致)', async () => {
+    const dir = await makeTmp('exp-gate-ok');
+    const { presetsDir, workflowPath } = await writeFixtures(dir);
+    const modelsPath = await writeModels(dir);
+    const out = join(dir, 'bundle');
+    const io = makeIo();
+    const code = await runCli(
+      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--models', modelsPath, '--level', 'brief', '--out', out],
+      io,
+      await makeDeps(),
+    );
+    assert.equal(code, 0);
+    assert.ok(await exists(join(out, 'workflow.json')));
+    assert.ok(await exists(join(out, 'README.md')));
+  });
+
+  it('无 model 声明的预设 + 无 --models → 仍可导出(现状不回归)', async () => {
+    const dir = await makeTmp('exp-gate-plain');
+    const presetsDir = join(dir, 'presets');
+    await mkdirSure(presetsDir);
+    await writeFile(join(presetsDir, 'plain__worker.json'), JSON.stringify(PLAIN_PRESET), 'utf8');
+    const workflowPath = join(dir, 'workflow.json');
+    await writeFile(workflowPath, JSON.stringify(PLAIN_WORKFLOW), 'utf8');
+    const out = join(dir, 'bundle');
+    const io = makeIo();
+    const code = await runCli(
+      ['workflow', 'export', workflowPath, '--presets', presetsDir, '--level', 'minimal', '--out', out],
+      io,
+      await makeDeps(),
+    );
+    assert.equal(code, 0);
+    assert.ok(await exists(join(out, 'workflow.json')));
+    assert.ok(io.outLines.join('\n').includes('models_registry_missing') === false);
   });
 });

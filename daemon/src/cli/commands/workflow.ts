@@ -8,7 +8,9 @@
  *          models_registry_missing 且退出非 0 —— 不允许「本地过检、
  *          daemon workflow.run 恒校验(空表即拒)时被拒」的假阳性。
  *   export 三档导出(minimal|brief|full)+ README;铁律:任何档位不含
- *          凭据 —— 擦除逻辑在 portability 模块(§3.8)。
+ *          凭据 —— 擦除逻辑在 portability 模块(§3.8)。导出门禁与 check
+ *          同一口径(issue #25):检查不过(含 models_registry_missing)
+ *          不导出 —— 坏包不出门。
  *
  * 两条子命令都是本地命令(不连 daemon):引用只在本地解析,每次都查。
  */
@@ -63,10 +65,15 @@ export const workflowCommand: Command = {
       ...(models !== undefined ? { models } : {}),
     });
 
+    // 模型准入 gate(issue #5,check/export 共用,#25):未给 --models 时,
+    // 声明了 model.tier 的节点无法做模型准入,与 daemon workflow.run 恒
+    // 校验的口径不一致 → 计入失败。两条子命令必须同一口径,坏包不出门。
+    const gate = models !== undefined ? [] : modelsRegistryMissingIssues(check.doc, loaded.presets);
+
     if (sub === 'check') {
-      return runCheckOutput(io, file, asJson, check, intent, loaded, models !== undefined);
+      return runCheckOutput(io, file, asJson, check, intent, loaded, gate);
     }
-    return runExport(io, file, asJson, flags, check, intent, loaded, registry);
+    return runExport(io, file, asJson, flags, check, intent, loaded, registry, gate);
   },
 };
 
@@ -82,11 +89,8 @@ function runCheckOutput(
   check: CheckedWorkflow,
   intent: IntentDoc | undefined,
   loaded: PresetLoadReport,
-  modelsProvided: boolean,
+  gate: Issue[],
 ): number {
-  // 口径对齐(issue #5):未给 --models 时,声明了 model.tier 的节点无法
-  // 做模型准入,与 daemon workflow.run 恒校验的口径不一致 → 报 fail。
-  const gate = modelsProvided ? [] : modelsRegistryMissingIssues(check.doc, loaded.presets);
   const issues = [...check.issues, ...gate];
   const ok = check.ok && gate.length === 0 && loaded.errors.length === 0;
   if (asJson) {
@@ -117,7 +121,8 @@ function runCheckOutput(
 /**
  * 未提供 models 注册表时的准入口径检查(issue #5):任一节点引用的预设
  * 声明了 model.tier → 报 models_registry_missing。workflow 无 model 声明
- * 则维持原状(不传 --models 也过检)。
+ * 则维持原状(不传 --models 也过检)。check 与 export 共用此 gate(#25),
+ * 保证 CLI 两条子命令与 daemon 同口径。
  */
 function modelsRegistryMissingIssues(
   doc: WorkflowDoc | null,
@@ -151,14 +156,18 @@ async function runExport(
   intent: IntentDoc | undefined,
   loaded: PresetLoadReport,
   registry: LoadedRegistry,
+  gate: Issue[],
 ): Promise<number> {
-  // 移植前核验:检查不过不导出,坏包不出门。
-  if (!check.ok || loaded.errors.length > 0) {
+  // 移植前核验:检查不过不导出,坏包不出门。模型准入口径与 check 完全
+  // 一致(issue #5 / #25):预设声明 model.tier 而未给 --models 时同样拒导,
+  // 否则目标机再跑 check 必然报 models_registry_missing。
+  if (!check.ok || gate.length > 0 || loaded.errors.length > 0) {
+    const issues = [...check.issues, ...gate];
     if (asJson) {
-      io.err(JSON.stringify({ ok: false, issues: check.issues, preset_errors: loaded.errors }, null, 2));
+      io.err(JSON.stringify({ ok: false, issues, preset_errors: loaded.errors }, null, 2));
     } else {
       for (const err of loaded.errors) io.err(`⚠ 预设加载失败 ${err.path}: ${err.message}`);
-      for (const iss of check.issues) io.err(`✗ [${iss.code}] ${iss.field}: ${iss.message}`);
+      for (const iss of issues) io.err(`✗ [${iss.code}] ${iss.field}: ${iss.message}`);
       io.err('检查未通过,拒绝导出(§3.5g:移植前后各跑一次 check)。');
     }
     return 1;
