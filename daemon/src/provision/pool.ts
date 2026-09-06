@@ -29,6 +29,8 @@ export interface ResourceGateOptions {
 
 interface Waiter {
   resolve: () => void;
+  /** 唤醒时槽位是否已由 release 同步移交(+1 已在 release 内完成),acquire 续段不再重复计数。 */
+  granted?: boolean;
 }
 
 export class ResourceGate {
@@ -69,14 +71,16 @@ export class ResourceGate {
     }
     // 先同步入队再发事件:emit 的 await 期间若有 release 插入,也能正确唤醒本等待者。
     let wake!: () => void;
+    const waiter: Waiter = { resolve: () => {}, granted: false };
     const queued = new Promise<void>((resolve) => {
       wake = resolve;
-      this.#queue.push({ resolve });
+      waiter.resolve = resolve;
+      this.#queue.push(waiter);
     });
     await this.#emitEvent('sandbox.queued', key, principal, { key, waiting: this.#queue.length, limit: this.limit });
     await queued;
     void wake;
-    this.#inUse += 1;
+    if (!waiter.granted) this.#inUse += 1; // 已由 release 同步移交则不重复计数
     await this.#emitEvent('sandbox.acquired', key, principal, { key, inUse: this.#inUse, limit: this.limit });
     return false;
   }
@@ -84,10 +88,19 @@ export class ResourceGate {
   /** 释放槽位并唤醒队首(成对于 acquire;多余 release 幂等忽略)。 */
   async release(key: string, principal?: Principal): Promise<void> {
     if (this.#inUse === 0) return;
+    // 关键段(减计数 + 移交队首 + 唤醒)必须在同一同步段内完成,emit 放到唤醒
+    // 之后(#22):若在减计数与唤醒之间 await emit(含 fsync),窗口内新 acquire
+    // 会看到空槽直接拿走,随后队首被唤醒再 +1 → inUse 超 slots(槽位超发)。
+    // 这里进一步把槽位 +1 也同步移交给队首(granted),连「release 未 await 就
+    // 同步连发 acquire」的极端窗口也一并封死:同步段内不可能有任何观察者插入。
     this.#inUse -= 1;
-    await this.#emitEvent('sandbox.released', key, principal, { key, inUse: this.#inUse, limit: this.limit });
     const next = this.#queue.shift();
-    if (next !== undefined) next.resolve();
+    if (next !== undefined) {
+      this.#inUse += 1;
+      next.granted = true;
+      next.resolve();
+    }
+    await this.#emitEvent('sandbox.released', key, principal, { key, inUse: this.#inUse, limit: this.limit });
   }
 
   async #emitEvent(

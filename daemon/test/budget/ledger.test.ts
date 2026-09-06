@@ -102,4 +102,32 @@ describe('budget/BudgetLedger', () => {
     const { led } = ledger(100);
     assert.rejects(led.record(-1, 0), TypeError);
   });
+
+  it('并发 record 越线:事件按档位序落盘,warning 先于 exceeded(#22)', async () => {
+    // 注入延迟 emit:warning 人为挂起,模拟 EventLog fsync 慢落账。
+    // 修复前:先越 soft 的 record 挂起在 warning 上,后越 hard 的并发 record
+    // 抢先完成 exceeded → 事件序倒挂;修复后 emit 串行化,落盘序 = 入队序。
+    const events: string[] = [];
+    let releaseWarning!: () => void;
+    const warningGate = new Promise<void>((resolve) => {
+      releaseWarning = resolve;
+    });
+    const led = new BudgetLedger(
+      { limitTokens: 1000 },
+      {
+        emit: async (ev) => {
+          if (ev.type === 'budget.warning') await warningGate; // 延迟 warning 落账
+          events.push(ev.type);
+        },
+      },
+    );
+    const p1 = led.record(850, 0); // 850 ≥ 800 越 soft(先发起 emit,被延迟)
+    const p2 = led.record(200, 0); // 1050 ≥ 1000 越 hard(在 warning 挂起窗口内发起)
+    releaseWarning();
+    const [v1, v2] = await Promise.all([p1, p2]);
+    assert.deepEqual(v1.crossed, ['soft']);
+    assert.deepEqual(v2.crossed, ['hard']);
+    assert.deepEqual(events, ['budget.warning', 'budget.exceeded']); // 档位序,不倒挂
+    assert.equal(led.level, 'hard');
+  });
 });

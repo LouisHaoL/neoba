@@ -115,6 +115,59 @@ describe('provision/ResourceGate', () => {
     assert.equal(g.waiting, 0);
     assert.equal(events.every((e) => e.type !== 'sandbox.queued'), true);
   });
+
+  it('release 的 emit 延迟窗口内并发 acquire 不超发,等待者 FIFO(#22)', async () => {
+    // 注入延迟 emit:sandbox.released 人为挂起,模拟 EventLog fsync 慢落账。
+    // 修复前:release 在减计数与唤醒之间 await 该 emit,窗口内新 acquire 拿走
+    // 空槽、队首再 +1 → inUse 超 slots;修复后关键段同步完成,窗口内只看到满员。
+    let maxInUse = 0;
+    const events: GateEvent[] = [];
+    let unblockReleased!: () => void;
+    const releasedGate = new Promise<void>((resolve) => {
+      unblockReleased = resolve;
+    });
+    const g = new ResourceGate({
+      slots: 1,
+      emit: (input) => {
+        events.push(input);
+        if (input.type === 'sandbox.acquired') {
+          maxInUse = Math.max(maxInUse, input.payload['inUse'] as number);
+        }
+        if (input.type === 'sandbox.released') return releasedGate; // 延迟落账
+        return undefined;
+      },
+    });
+    const order: string[] = [];
+    await g.acquire('a');
+    const w1 = g.acquire('b').then((v) => (order.push('b'), v));
+    const w2 = g.acquire('c').then((v) => (order.push('c'), v));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(g.waiting, 2);
+    assert.equal(g.inUse, 1);
+
+    const rp = g.release('a'); // 关键段同步:减计数 + 队首接管 + 唤醒;released 事件被延迟
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(g.inUse, 1); // 队首 b 已同步接管槽位,而非留 0 让新 acquire 抢走
+    assert.equal(g.waiting, 1);
+
+    const sneaky = g.acquire('d').then((v) => (order.push('d'), v)); // 延迟窗口内的并发 acquire
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(g.inUse, 1); // inUse 永不超 slots=1
+    assert.equal(g.waiting, 2); // d 只能正常排队
+
+    unblockReleased();
+    await rp;
+    assert.equal(await w1, false); // 排队者唤醒返回 false(审计语义)
+    await g.release('b');
+    assert.equal(await w2, false);
+    await g.release('c');
+    assert.equal(await sneaky, false);
+    await g.release('d');
+    assert.deepEqual(order, ['b', 'c', 'd']); // FIFO 确定性唤醒
+    assert.equal(g.inUse, 0);
+    assert.equal(maxInUse <= 1, true); // 全程无超发
+    assert.equal(events.filter((e) => e.type === 'sandbox.released').length, 4);
+  });
 });
 
 /** 记录 create/destroy 调用序的最小 provider 桩。 */
