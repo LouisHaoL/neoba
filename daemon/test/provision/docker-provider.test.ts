@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   CommandFailedError,
@@ -66,6 +67,52 @@ describe("DockerProvider(注入假 runner)", () => {
     assert.ok(!Number.isNaN(Date.parse(handle.createdAt)));
     assert.equal(handle.labels["neoba.task"], "t42");
     assert.equal(handle.labels[NEOBA_MANAGED_LABEL], "true");
+  });
+
+  it("secret 明文不落 argv(#11):create 经 --env-file 注入,文件内容正确且用后即删", async () => {
+    /** 捕获 CLI 运行中的 env-file 路径与内容(先于用后即删)。 */
+    const paths: string[] = [];
+    const contents: string[] = [];
+    const { provider, calls } = makeProvider((args) => {
+      const i = args.indexOf("--env-file");
+      if (i > -1) {
+        paths.push(args[i + 1]!);
+        contents.push(readFileSync(args[i + 1]!, "utf8"));
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const handle = await provider.create({
+      ...SPEC,
+      env: { NEBOBA_SECRET_TOKEN: "s3cr3t-value!", CI: "1" },
+    });
+
+    // argv 全量(每次调用逐元素)不含 secret 明文与 -e/--env K=V 形态
+    assert.ok(!calls.flat().some((a) => a.includes("s3cr3t-value!")));
+    assert.ok(!calls.flat().some((a) => a === "-e" || a === "--env"));
+    assert.ok(!calls.flat().some((a) => a.includes("CI=1")));
+    // env-file 内容为逐行 K=V(运行中读到)
+    assert.equal(contents[0], "NEBOBA_SECRET_TOKEN=s3cr3t-value!\nCI=1\n");
+    // 用后即删
+    assert.equal(paths.length, 1);
+    assert.equal(existsSync(paths[0]!), false);
+    assert.equal(handle.status, "running");
+  });
+
+  it("create 失败路径同样清理 env-file(用后即删)", async () => {
+    const paths: string[] = [];
+    const { provider } = makeProvider((args) => {
+      const i = args.indexOf("--env-file");
+      if (args[0] === "create" && i > -1) paths.push(args[i + 1]!);
+      return args[0] === "create"
+        ? { code: 125, stdout: "", stderr: "docker: invalid reference format." }
+        : { code: 0, stdout: "", stderr: "" };
+    });
+    await assert.rejects(
+      provider.create({ ...SPEC, env: { NEBOBA_SECRET_TOKEN: "s3cr3t" } }),
+      CommandFailedError,
+    );
+    assert.equal(paths.length, 1);
+    assert.equal(existsSync(paths[0]!), false);
   });
 
   it("exec:走 docker exec,结果透传,支持 opts", async () => {

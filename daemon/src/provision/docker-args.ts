@@ -2,7 +2,7 @@
  * SandboxSpec → docker CLI 参数的纯函数映射。
  * 产出交给 CliRunner 执行;测试直接断言参数数组,不依赖真实 docker。
  */
-import { NotSupportedError } from "./errors.ts";
+import { InvalidSpecError, NotSupportedError } from "./errors.ts";
 import { mergeLabels } from "./labels.ts";
 import type { ExecOptions, LogsOptions, SandboxSpec } from "./types.ts";
 
@@ -11,8 +11,20 @@ export function containerName(id: string): string {
   return `neoba-${id.slice(0, 12)}`;
 }
 
-/** docker create 全量参数(资源限额 / 网络 / 挂载 ro:rw / env / labels / 非 root 用户)。 */
-export function buildCreateArgs(spec: SandboxSpec, id: string, createdAt: string): string[] {
+/**
+ * docker create 全量参数(资源限额 / 网络 / 挂载 ro:rw / env / labels / 非 root 用户)。
+ *
+ * env 不经 `-e K=V` 上命令行(issue #11):spec.env 非空时必须提供 env-file
+ * 路径(由 provider 写 0600 临时文件、CLI 结束后删除,见 env-file.ts),
+ * 参数面只出现 `--env-file <path>`。env 非空但缺 envFile → InvalidSpecError,
+ * 防明文回归。
+ */
+export function buildCreateArgs(
+  spec: SandboxSpec,
+  id: string,
+  createdAt: string,
+  envFile?: string,
+): string[] {
   const args: string[] = ["create", "--name", containerName(id)];
 
   for (const [k, v] of Object.entries(mergeLabels(spec, "docker", id, createdAt))) {
@@ -41,7 +53,15 @@ export function buildCreateArgs(spec: SandboxSpec, id: string, createdAt: string
   if (spec.user !== undefined) args.push("--user", spec.user);
   if (spec.workdir !== undefined) args.push("--workdir", spec.workdir);
 
-  for (const [k, v] of Object.entries(spec.env ?? {})) args.push("-e", `${k}=${v}`);
+  const envEntries = Object.entries(spec.env ?? {});
+  if (envEntries.length > 0) {
+    if (envFile === undefined) {
+      throw new InvalidSpecError(
+        "spec.env 非空但未提供 env-file 路径:env 明文禁止经 `-e K=V` 上命令行(#11)",
+      );
+    }
+    args.push("--env-file", envFile);
+  }
   for (const m of spec.mounts ?? []) args.push("-v", `${m.source}:${m.target}:${m.mode}`);
 
   args.push(spec.image, ...(spec.command ?? []));
@@ -52,6 +72,11 @@ export function buildStartArgs(id: string): string[] {
   return ["start", id];
 }
 
+/**
+ * docker exec:opts.env 走 `--env K=V`(docker exec 无 --env-file 等价物)。
+ * 当前无 secret 流经 exec env(secret 只在 create 期经 spec.env 注入,
+ * engine/exec-runtime 只传 workdir);若有调用方需经 exec 传凭据,须先补通道。
+ */
 export function buildExecArgs(id: string, cmd: string[], opts?: ExecOptions): string[] {
   const args: string[] = ["exec"];
   if (opts?.user !== undefined) args.push("--user", opts.user);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  InvalidSpecError,
   NEOBA_CREATED_AT_LABEL,
   NEOBA_MANAGED_LABEL,
   NEOBA_PROVIDER_LABEL,
@@ -104,10 +105,36 @@ describe("buildCreateArgs:spec → docker 参数映射", () => {
     ]);
   });
 
-  it("环境变量:-e K=V", () => {
-    const args = buildCreateArgs({ image: "img", env: { CI: "1", FOO: "bar" } }, ID, CREATED_AT);
-    const envs = args.filter((a, i) => i > 0 && args[i - 1] === "-e").sort();
-    assert.deepEqual(envs, ["CI=1", "FOO=bar"]);
+  it("环境变量:env 经 --env-file 临时文件传递,明文不落 argv(#11)", () => {
+    const args = buildCreateArgs(
+      { image: "img", env: { CI: "1", NEBOBA_SECRET_TOKEN: "s3cr3t-value" } },
+      ID,
+      CREATED_AT,
+      "/tmp/neoba-env-x.env",
+    );
+    const idx = args.indexOf("--env-file");
+    assert.ok(idx > -1);
+    assert.equal(args[idx + 1], "/tmp/neoba-env-x.env");
+    // argv 全量不出现 -e K=V 形态与任何明文
+    assert.ok(!args.includes("-e"));
+    assert.ok(!args.includes("--env"));
+    assert.ok(!args.some((a) => a.includes("s3cr3t-value") || a.includes("CI=1")));
+  });
+
+  it("env 非空但未提供 env-file 路径 → InvalidSpecError(防 -e K=V 明文回归)", () => {
+    assert.throws(
+      () => buildCreateArgs({ image: "img", env: { CI: "1" } }, ID, CREATED_AT),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidSpecError);
+        assert.equal(err.code, "invalid_spec");
+        return true;
+      },
+    );
+  });
+
+  it("env 为空:不出现 --env-file(argv 零变化)", () => {
+    const args = buildCreateArgs({ image: "img" }, ID, CREATED_AT, "/tmp/neoba-env-x.env");
+    assert.ok(!args.includes("--env-file"));
   });
 
   it("非 root 用户与工作目录:--user / --workdir", () => {
