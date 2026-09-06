@@ -84,6 +84,8 @@ export interface ApprovalEventInput {
         readonly cap: string;
         readonly scope: string;
         readonly reason: string;
+        /** issue #14 起随事件落盘(重放重建台账用);测试注入的旧事件可缺省。 */
+        readonly duration?: string;
       }
     | {
         readonly reqId: string;

@@ -234,6 +234,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
     },
     ...(opts.now !== undefined ? { now: opts.now } : {}),
   });
+  // 启动重放(issue #14):从重放事件重建审批台账,重启后 pending 单仍可
+  // decide(否则 TaskStore 把任务标回 waiting_approval 却永远无人能定案)。
+  // 残缺事件被保守跳过,不阻断启动。
+  board.restoreFromEvents(replayed);
   const modelsPath = join(stateDir, 'modelscore.json');
   let initialModels: LoadedModelRegistry;
   if (opts.models !== undefined) {
