@@ -407,7 +407,32 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
   let running = false;
   let inputIterator: AsyncIterator<Uint8Array> | null = null;
   let buffer = '';
+  const decoder = new TextDecoder();
   const pending = new Set<Promise<unknown>>();
+  /** MCP 请求 id → 在飞 daemon 调用的 AbortController(notifications/cancelled 用)。 */
+  const inflight = new Map<string | number | null, AbortController>();
+  /** 写回队列:并发处理下响应帧经此串行写 stdout,帧与帧不互相穿插。 */
+  let writeQueue: Promise<void> = Promise.resolve();
+
+  /** 串行化写回一帧;单帧写回失败(如 stdout 已关)不拖垮其余帧。 */
+  function writeBack(text: string): void {
+    writeQueue = writeQueue.then(() => {
+      options.output.write(text + '\n');
+    }).catch(() => {
+      // 写回失败只能吞掉:桥没有 stderr 通道,且不能让一帧的 IO 错误炸掉读循环。
+    });
+  }
+
+  /** notifications/cancelled:abort 对应在飞调用的 controller,清映射。 */
+  function cancelInflight(params: unknown): void {
+    const p = asParamsObject(params);
+    const requestId = p['requestId'];
+    if (typeof requestId !== 'string' && typeof requestId !== 'number') return;
+    const controller = inflight.get(requestId);
+    if (controller === undefined) return;
+    inflight.delete(requestId);
+    controller.abort();
+  }
 
   function errorResponse(id: string | number | null, code: number, message: string, data?: unknown): Record<string, unknown> {
     return { jsonrpc: '2.0', id, error: { code, message, ...(data === undefined ? {} : { data }) } };
@@ -442,15 +467,15 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
     return merged;
   }
 
-  async function callTool(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async function callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const tool = TOOL_BY_NAME.get(name);
     if (tool === undefined) throw new Error(`未知工具: ${name}`);
-    if (tool.name === 'session_init') return doExplicitSessionInit(args);
+    if (tool.name === 'session_init') return doExplicitSessionInit(args, signal);
     const merged = tool.needsSession ? injectSession(args) : args;
-    return toolResult(await options.callDaemon(name.replaceAll('_', '.'), merged));
+    return toolResult(await options.callDaemon(name.replaceAll('_', '.'), merged, signal));
   }
 
-  async function doExplicitSessionInit(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async function doExplicitSessionInit(args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const tenant = typeof args['tenant'] === 'string' ? args['tenant'] : options.tenant ?? 'default';
     const session =
       typeof args['session'] === 'string' ? args['session'] : `mcp-${random()}`;
@@ -461,7 +486,7 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
       harness: typeof args['harness'] === 'string' ? args['harness'] : 'neoba-mcp-bridge',
       capabilities: {},
     };
-    const result = await options.callDaemon('session.init', request);
+    const result = await options.callDaemon('session.init', request, signal);
     sessionIdentity = { tenant, session };
     return toolResult(result);
   }
@@ -521,7 +546,15 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
           if (typeof p['arguments'] !== 'object' || p['arguments'] === null || Array.isArray(p['arguments'])) {
             return errorResponse(id, RPC_ERRORS.INVALID_PARAMS, 'params.arguments 必须是对象');
           }
-          return { jsonrpc: '2.0', id, result: await callTool(name, asParamsObject(p['arguments'])) };
+          // 登记 AbortController:notifications/cancelled 或 close 可提前取消
+          // 这次在飞的 daemon 调用;无论成败都清映射。
+          const controller = new AbortController();
+          inflight.set(id, controller);
+          try {
+            return { jsonrpc: '2.0', id, result: await callTool(name, asParamsObject(p['arguments']), controller.signal) };
+          } finally {
+            inflight.delete(id);
+          }
         }
         default:
           return errorResponse(id, RPC_ERRORS.METHOD_NOT_FOUND, `未知方法: ${method}`);
@@ -540,6 +573,12 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
     if (!parsed.ok) {
       return JSON.stringify(errorResponse(null, RPC_ERRORS.PARSE, '不是合法的 JSON-RPC 消息'));
     }
+    if (parsed.message.method === 'notifications/cancelled') {
+      // MCP 取消通知:abort 对应在飞 daemon 调用(客户端侧 fetch abort),
+      // 错误结果帧照常以原 id 写回(result.isError,MCP 约定),通知本身不应答。
+      cancelInflight(parsed.message.params);
+      return null;
+    }
     if (parsed.message.method.startsWith('notifications/')) return null;
     const response = await dispatch(parsed.message);
     return response === null ? null : JSON.stringify(response);
@@ -555,23 +594,31 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
           while (true) {
             const next = await inputIterator.next();
             if (next.done === true) break;
-            buffer += new TextDecoder().decode(next.value);
+            buffer += decoder.decode(next.value, { stream: true });
             let nl = buffer.indexOf('\n');
             while (nl !== -1) {
               const line = buffer.slice(0, nl);
               buffer = buffer.slice(nl + 1);
-              const task = handleLine(line).then((out) => {
-                if (out !== null) options.output.write(out + '\n');
-              });
+              // 并发处理:每行独立异步执行,不逐行 await——一条挂起的 tools/call
+              // 不再阻塞后续帧(ping 等照常应答)。JSON-RPC 响应之间无顺序要求,
+              // 写回统一经 writeBack 串行化,stdout 帧不互相穿插。
+              const task = handleLine(line)
+                .then((out) => {
+                  if (out !== null) writeBack(out);
+                })
+                .catch(() => {
+                  // 单帧意外异常(dispatch 已兜底工具错误,这里防序列化等漏网)不拖垮读循环。
+                });
               pending.add(task);
-              try {
-                await task;
-              } finally {
+              void task.finally(() => {
                 pending.delete(task);
-              }
+              });
               nl = buffer.indexOf('\n');
             }
           }
+          // 流已关闭:MCP stdio 规范要求每条消息以 \n 结束,残余无换行碎片
+          // 不构成完整帧,按规范丢弃(与官方 stdio 行为一致)。
+          buffer = '';
         } catch {
           // 入向流异常结束:与 stdin 关闭同义,桥进程随之收尾。
         }
@@ -582,7 +629,12 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
     sessionReady: () => sessionSettled,
     async close() {
       running = false;
+      // 在飞调用逐个 abort(与 notifications/cancelled 同通道):传输层立即失败、
+      // 错误帧写回,pending 随之收敛,allSettled 不再永挂。
+      for (const controller of [...inflight.values()]) controller.abort();
+      inflight.clear();
       await Promise.allSettled([...pending]);
+      await writeQueue;
     },
   };
 }

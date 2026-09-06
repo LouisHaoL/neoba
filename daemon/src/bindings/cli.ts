@@ -5,6 +5,7 @@
  *   NEOBA_BASE_URL    daemon 地址,默认 http://127.0.0.1:7917
  *   NEOBA_TOKEN_FILE  token 文件路径,默认 ~/.neoba/token
  *   NEOBA_TOKEN       直接给 token(优先于 token 文件;子进程注入场景)
+ *   NEOBA_TIMEOUT_MS  单次 daemon 调用超时毫秒,默认 10000(与 cli/rpc.ts 口径一致)
  *
  * stdin 收 MCP(换行分隔 JSON-RPC),stdout 回应答;日志/错误走 stderr。
  */
@@ -13,7 +14,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createDaemonHttpClient } from './client.ts';
 import { createMcpBridge, MCP_PROTOCOL_VERSIONS } from './mcp.ts';
-import { BASE_URL_ENV, TOKEN_ENV, TOKEN_FILE_ENV } from './spawn.ts';
+import { BASE_URL_ENV, TIMEOUT_ENV, TOKEN_ENV, TOKEN_FILE_ENV } from './spawn.ts';
 
 function fail(message: string): never {
   process.stderr.write(`[neoba-mcp] ${message}\n`);
@@ -29,7 +30,12 @@ async function main(): Promise<void> {
     .then((raw) => raw.replace(/\r?\n$/, ''))
     .catch(() => fail(`读不到 token(NEOBA_TOKEN 或 ${tokenFile})`));
 
-  const callDaemon = createDaemonHttpClient({ baseUrl, token });
+  const timeoutRaw = process.env[TIMEOUT_ENV];
+  const timeoutMs =
+    timeoutRaw !== undefined && timeoutRaw !== '' && Number.isFinite(Number(timeoutRaw))
+      ? Number(timeoutRaw)
+      : undefined;
+  const callDaemon = createDaemonHttpClient({ baseUrl, token, timeoutMs });
   const bridge = createMcpBridge({
     input: process.stdin,
     output: process.stdout,
