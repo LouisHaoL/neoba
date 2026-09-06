@@ -139,21 +139,99 @@ describe('provision/WarmPool(支持 snapshot 的后端:真池化)', () => {
     assert.equal(pool.size, 1);
   });
 
-  it('规格签名:异规格(mounts/env 差异)不命中,各自归池', async () => {
+  it('规格签名:异规格(secret/config 挂载、env 差异)不命中,各自归池', async () => {
     const inner = fakeProvider({ snapshotCapable: true });
     const pool = new WarmPool({ provider: inner });
     const a = await pool.acquire(specOf('n1'));
     await pool.release(a.handle, { healthy: true });
-    // 同 image 但挂载不同 → 不允许复用(§4.4 挂载静默错配不可接受)
+    // 同 image 但挂载集不同(凭据挂载属 §4.4 硬规则)→ 不允许复用
     const b = await pool.acquire({
       ...specOf('n2'),
-      mounts: [{ kind: 'workdir', source: 'w', target: '/workspace', mode: 'rw' }],
+      mounts: [{ kind: 'config', source: 'cfg-1', target: '/etc/app', mode: 'ro' }],
     });
     assert.equal(b.fromPool, false);
     assert.equal(pool.size, 1); // a 的条目仍在池内
     // 同规格再次取用 → 命中
     const c = await pool.acquire(specOf('n3'));
     assert.equal(c.fromPool, true);
+  });
+
+  it('规格签名:workdir 挂载 source 归一化,不同 task/node 的相同规格同签名(#26)', async () => {
+    const inner = fakeProvider({ snapshotCapable: true });
+    const pool = new WarmPool({ provider: inner });
+    // 模拟编排场景:task t1/node n1 与 task t2/node n2 规格相同,
+    // 仅 workdir 挂载 source(per-node 唯一段)不同 → 允许跨节点命中
+    const a = await pool.acquire({
+      image: 'neoba/sandbox:latest',
+      workdir: '/workspace',
+      mounts: [{ kind: 'workdir', source: 'neoba-t1-n1', target: '/workspace', mode: 'rw' }],
+      env: { FOO: 'bar' },
+      labels: { 'neoba.task': 't1', 'neoba.node': 'n1' },
+    });
+    await pool.release(a.handle, { healthy: true });
+    const b = await pool.acquire({
+      image: 'neoba/sandbox:latest',
+      workdir: '/workspace',
+      mounts: [{ kind: 'workdir', source: 'neoba-t2-n2', target: '/workspace', mode: 'rw' }],
+      env: { FOO: 'bar' },
+      labels: { 'neoba.task': 't2', 'neoba.node': 'n2' },
+    });
+    assert.equal(b.fromPool, true); // 签名相同 → 跨节点回热命中
+    // 回热实例继承当前节点标签(事件留痕按 task t2 记账)
+    assert.equal(b.handle.labels['neoba.task'], 't2');
+    assert.equal(b.handle.labels['neoba.node'], 'n2');
+    assert.equal(pool.size, 0);
+  });
+
+  it('规格签名:env 或 network 不同 → 不同签名,不混池', async () => {
+    const inner = fakeProvider({ snapshotCapable: true });
+    const pool = new WarmPool({ provider: inner, capacity: 4 });
+    const base = (node: string): SandboxSpec => ({
+      image: 'neoba/sandbox:latest',
+      workdir: '/workspace',
+      mounts: [{ kind: 'workdir', source: `neoba-t1-${node}`, target: '/workspace', mode: 'rw' }],
+      env: { FOO: 'bar' },
+      labels: { 'neoba.task': 't1', 'neoba.node': node },
+    });
+    const a = await pool.acquire(base('n1'));
+    await pool.release(a.handle, { healthy: true });
+    // env 不同 → 冷拉(a 条目仍在池内)
+    const b = await pool.acquire({ ...base('n2'), env: { FOO: 'baz' } });
+    assert.equal(b.fromPool, false);
+    assert.equal(pool.size, 1);
+    // network 不同 → 冷拉(a/b 条目仍在池内)
+    const c = await pool.acquire({ ...base('n3'), network: { mode: 'bridge' } });
+    assert.equal(c.fromPool, false);
+    // b/c 各自归池后,池内三个不同签名条目并存
+    await pool.release(b.handle, { healthy: true });
+    await pool.release(c.handle, { healthy: true });
+    assert.equal(pool.size, 3);
+    // 同 env/network 的节点 → 命中 a 的条目(findIndex 取最早入池的匹配条目)
+    const d = await pool.acquire(base('n4'));
+    assert.equal(d.fromPool, true);
+    assert.equal(inner.restoredRefs[0], `snap-${a.handle.id}`);
+  });
+
+  it('池命中端到端:节点 A release 回池后,不同 task 的节点 B acquire 命中(#26)', async () => {
+    const inner = fakeProvider({ snapshotCapable: true });
+    const pool = new WarmPool({ provider: inner });
+    const specOfTask = (taskId: string, node: string): SandboxSpec => ({
+      image: 'neoba/sandbox:latest',
+      workdir: '/workspace',
+      mounts: [{ kind: 'workdir', source: `neoba-${taskId}-${node}`, target: '/workspace', mode: 'rw' }],
+      labels: { 'neoba.task': taskId, 'neoba.node': node },
+    });
+    // 节点 A(task t1):冷拉 → 健康回池
+    const a = await pool.acquire(specOfTask('t1', 'a'));
+    assert.equal(a.fromPool, false);
+    assert.equal(await pool.release(a.handle, { healthy: true }), 'pooled');
+    assert.equal(pool.size, 1);
+    // 节点 B(不同 task t2):acquire 命中池内条目,fromPool=true
+    const b = await pool.acquire(specOfTask('t2', 'b'));
+    assert.equal(b.fromPool, true);
+    assert.deepEqual(inner.restoredRefs, [`snap-${a.handle.id}`]); // 走 restore 回热
+    assert.equal(b.handle.labels['neoba.task'], 't2'); // 留痕归当前任务
+    assert.equal(pool.size, 0);
   });
 
   it('不健康(release 探针失败)→ 销毁,不回池', async () => {

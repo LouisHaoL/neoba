@@ -10,8 +10,9 @@
  * 语义要点:
  * - 仅对 snapshotCapable 后端真池化;docker/memory 未声明该能力 → 直通退化:
  *   acquire 恒冷拉、release 恒销毁(接口不变,池层零行为);
- * - 池条目按「规格签名」(image+env+mounts+resources+network+user+workdir)匹配,
- *   防止把 A 节点的挂载/环境静默塞给 B 节点(§4.4 spawn 硬规则的池化侧守卫);
+ * - 池条目按「规格签名」(image+env+resources+network+user+workdir+非 workdir
+ *   挂载;workdir 挂载归一化剔除 per-node source,#26)匹配,防止把 A 节点的
+ *   挂载/环境静默塞给 B 节点(§4.4 spawn 硬规则的池化侧守卫);
  * - 与 M1 ResourceGate 共用同一信号量(协作语义:gate 控并发上限,pool 复用
  *   实例)——gate 挂在 NodeExecutor 执行包裹层,pool 在 gate 之内:acquire 先过
  *   gate(满员排队),命中/冷拉后占槽;release 回池/销毁后释放槽位。空闲池条目
@@ -129,7 +130,11 @@ export class WarmPool implements SandboxPool {
         // 池内不残留引用;槽位由外层 catch 归还后原样重抛。
         const handle = await this.#provider.restore(entry.ref);
         // 回热实例继承本节点标签(gate key / 事件留痕按当前任务记账),
-        // 并带上规格签名供 release 回池匹配
+        // 并带上规格签名供 release 回池匹配。
+        // 挂载语义(#26):restore 不重挂载(restore 参数无 mounts),回热实例的
+        // /workspace 内容即 snapshot 固化的旧节点 workdir 卷内容 —— 这正是回热
+        // 收益所在;新节点的 workdir 卷(per-node 唯一 source)不重挂,内容语义
+        // 由 snapshot 承接,故签名对 workdir source 归一化是安全的。
         handle.labels = { ...handle.labels, "neoba.pool-key": sig, ...(spec.labels ?? {}) };
         return { handle, fromPool: true };
       }
@@ -225,15 +230,27 @@ export class WarmPool implements SandboxPool {
 const DEFAULT_PRINCIPAL: Principal = { tenant: "default", session: null, task: null, agent: null };
 
 /**
- * 规格签名:池命中判据。实例环境(image/env/mounts/资源/网络/user/workdir)
- * 必须逐位一致才允许复用 —— 挂载与 env 属 §4.4 spawn 硬规则,静默错配不可接受;
- * labels(任务/节点身份)不参与签名,回热后由调用方覆写。
+ * 规格签名:池命中判据。实例环境(image/env/资源/网络/user/workdir)必须逐位
+ * 一致才允许复用;labels(任务/节点身份)不参与签名,回热后由调用方覆写。
+ *
+ * workdir 挂载归一化(#26):source 由 NodeExecutor 逐节点生成
+ * (`neoba-${taskId}-${nodeId}`,node-executor.ts),属 per-node 唯一段,若参与
+ * 逐位比对则跨节点永不命中,池退化成「仅同节点重试可复用」。签名只保留
+ * target+mode(source 剔除):回热内容本就来自 snapshot 本身(restore 不重挂载,
+ * 见 microsandbox-provider restore),workdir source 的差异不构成复用障碍;
+ * secret/config 挂载(§4.4 凭据/配置硬规则)仍全量参与签名,静默错配不可接受。
+ * env/network/resources 仍逐位比对,不同环境/网络的节点绝不混池。
  */
 function specSignature(spec: SandboxSpec): string {
+  const mounts = (spec.mounts ?? []).map((m) =>
+    m.kind === "workdir"
+      ? { kind: m.kind, target: m.target, mode: m.mode }
+      : m,
+  );
   return JSON.stringify([
     spec.image,
     spec.env ?? {},
-    spec.mounts ?? [],
+    mounts,
     spec.resources ?? {},
     spec.network ?? { mode: "none" },
     spec.user,
