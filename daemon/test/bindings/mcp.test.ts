@@ -10,8 +10,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
-import { createMcpBridge, createDaemonHttpClient, spawnBridge } from '../../src/bindings/index.ts';
-import type { McpBridge } from '../../src/bindings/index.ts';
+import { createMcpBridge, createDaemonHttpClient, spawnBridge, DaemonCallError } from '../../src/bindings/index.ts';
+import type { DaemonCaller, McpBridge } from '../../src/bindings/index.ts';
 import { startDaemon } from '../../src/daemon/index.ts';
 import type { DaemonHandle } from '../../src/daemon/index.ts';
 
@@ -48,7 +48,7 @@ interface Harness {
 }
 
 function makeBridge(
-  callDaemon: (method: string, params: unknown) => Promise<unknown>,
+  callDaemon: DaemonCaller,
   options: Partial<Parameters<typeof createMcpBridge>[0]> = {},
 ): Harness {
   const written: string[] = [];
@@ -315,5 +315,221 @@ describe('spawnBridge 子进程模式', () => {
     } finally {
       child.kill();
     }
+  });
+});
+
+// ---- #19 回归:超时 / 并发读循环 / cancelled 取消 / close 收敛 ----
+
+/** 假 stdio 入向流:可编程 push 完整行,end 模拟 stdin 关闭。 */
+interface FakeStdio {
+  readonly input: AsyncIterable<Uint8Array>;
+  push(line: string): void;
+  end(): void;
+}
+
+function fakeStdio(): FakeStdio {
+  const queue: Uint8Array[] = [];
+  let waiters: ((result: IteratorResult<Uint8Array>) => void)[] = [];
+  return {
+    input: {
+      [Symbol.asyncIterator]() {
+        return {
+          next(): Promise<IteratorResult<Uint8Array>> {
+            const chunk = queue.shift();
+            if (chunk !== undefined) return Promise.resolve({ value: chunk, done: false });
+            return new Promise((resolve) => { waiters.push(resolve); });
+          },
+        };
+      },
+    },
+    push(line) {
+      const chunk = new TextEncoder().encode(`${line}\n`);
+      const waiter = waiters.shift();
+      if (waiter !== undefined) waiter({ value: chunk, done: false });
+      else queue.push(chunk);
+    },
+    end() {
+      const all = waiters;
+      waiters = [];
+      for (const waiter of all) waiter({ value: undefined, done: true });
+    },
+  };
+}
+
+/** 轮询直到断言成立(帧写回时序不确定,轮询等)。 */
+async function waitFor(pred: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!pred()) {
+    if (Date.now() > deadline) throw new Error('waitFor 超时');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/** 永不 resolve 但响应 abort 的假 fetch:模拟 daemon TCP 可达但停摆。 */
+function hangingFetch(): typeof fetch {
+  return (_url, init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+  });
+}
+
+/** 尊重 signal 的假 callDaemon:abort 时以取消错误拒绝(模拟真实 fetch 行为)。 */
+function cancelAwareCallDaemon(): DaemonCaller {
+  return (method, _params, signal) => new Promise((_, reject) => {
+    const cancel = () => reject(new DaemonCallError({
+      code: -32000, message: '调用被取消', data: { code: 'DAEMON_CANCELLED' }, status: 0,
+    }));
+    if (signal?.aborted) { cancel(); return; }
+    signal?.addEventListener('abort', cancel, { once: true });
+  });
+}
+
+describe('daemon HTTP 客户端超时与取消(#19)', () => {
+  it('fetch 永挂:按 timeoutMs 抛 DaemonCallError(code=-32000, data.code=DAEMON_TIMEOUT)', async () => {
+    const caller = createDaemonHttpClient({
+      baseUrl: 'http://127.0.0.1:1', token: 't', fetchImpl: hangingFetch(), timeoutMs: 30,
+    });
+    await assert.rejects(caller('capabilities.list', {}), (err: unknown) => {
+      assert.ok(err instanceof DaemonCallError);
+      assert.equal(err.code, -32000);
+      assert.equal(err.status, 0);
+      assert.equal((err.data as Record<string, unknown>)['code'], 'DAEMON_TIMEOUT');
+      return true;
+    });
+  });
+
+  it('外部 signal abort:抛 DaemonCallError(data.code=DAEMON_CANCELLED),超时定时器被清理', async () => {
+    const fetchImpl: typeof fetch = (_url, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    });
+    const caller = createDaemonHttpClient({
+      baseUrl: 'http://127.0.0.1:1', token: 't', fetchImpl, timeoutMs: 10_000,
+    });
+    const controller = new AbortController();
+    const call = caller('capabilities.list', {}, controller.signal);
+    setTimeout(() => controller.abort(), 10).unref();
+    await assert.rejects(call, (err: unknown) => {
+      assert.ok(err instanceof DaemonCallError);
+      assert.equal((err.data as Record<string, unknown>)['code'], 'DAEMON_CANCELLED');
+      return true;
+    });
+  });
+});
+
+describe('桥健壮性:并发读循环 / 取消 / 收尾(#19)', () => {
+  it('daemon fetch 永挂:调用按超时失败,读循环不被阻塞(ping 照常应答)', async () => {
+    const caller = createDaemonHttpClient({
+      baseUrl: 'http://127.0.0.1:1', token: 't', fetchImpl: hangingFetch(), timeoutMs: 80,
+    });
+    const stdio = fakeStdio();
+    const written: string[] = [];
+    const bridge = createMcpBridge({
+      input: stdio.input,
+      output: { write(chunk: string) { written.push(chunk); return true; } },
+      callDaemon: caller,
+      autoSession: false,
+    });
+    bridge.start();
+    stdio.push(JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'c', version: '0' } },
+    }));
+    stdio.push(JSON.stringify({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'capabilities_list', arguments: {} },
+    }));
+    stdio.push(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' }));
+    // ping 在 tools/call 超时(80ms)之前就应答 → 读循环没有被挂起调用阻塞
+    await waitFor(() => written.some((l) => l.includes('"id":3')));
+    const ping = JSON.parse(written.find((l) => l.includes('"id":3'))!);
+    assert.deepEqual(ping['result'], {});
+    // 挂起调用按超时收敛:错误帧写回,文案带 DAEMON_TIMEOUT
+    await waitFor(() => written.some((l) => l.includes('"id":2')));
+    const timed = JSON.parse(written.find((l) => l.includes('"id":2'))!);
+    assert.equal(timed['result']['isError'], true);
+    assert.match(timed['result']['content'][0]['text'] as string, /DAEMON_TIMEOUT/);
+    stdio.end();
+    await bridge.close();
+  });
+
+  it('并发两调用乱序返回:响应 id 一一对应', async () => {
+    let resolveCaps: (value: unknown) => void = () => {};
+    const capsPromise = new Promise((resolve) => { resolveCaps = resolve; });
+    const callDaemon: DaemonCaller = (method: string) => {
+      if (method === 'capabilities.list') return capsPromise;
+      return Promise.resolve({ which: method });
+    };
+    const harness = makeBridge(callDaemon, { autoSession: false });
+    await harness.call({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'c', version: '0' } },
+    });
+    const first = harness.call({
+      jsonrpc: '2.0', id: 10, method: 'tools/call',
+      params: { name: 'capabilities_list', arguments: {} },
+    });
+    const second = harness.call({
+      jsonrpc: '2.0', id: 11, method: 'tools/call',
+      params: { name: 'models_list', arguments: {} },
+    });
+    // 第一个调用还挂着,第二个先返回 → 逐行 await 的旧实现会在这里死锁
+    const secondFrame = await second;
+    assert.equal(secondFrame['id'], 11);
+    assert.equal(secondFrame['result']['structuredContent']['which'], 'models.list');
+    resolveCaps({ which: 'capabilities.list' });
+    const firstFrame = await first;
+    assert.equal(firstFrame['id'], 10);
+    assert.equal(firstFrame['result']['structuredContent']['which'], 'capabilities.list');
+  });
+
+  it('notifications/cancelled:在飞调用被提前取消(结果帧 isError,含取消语义)', async () => {
+    const harness = makeBridge(cancelAwareCallDaemon(), { autoSession: false });
+    await harness.call({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'c', version: '0' } },
+    });
+    const inflight = harness.call({
+      jsonrpc: '2.0', id: 7, method: 'tools/call',
+      params: { name: 'capabilities_list', arguments: {} },
+    });
+    await harness.notify({
+      jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 7 },
+    });
+    const frame = await inflight;
+    assert.equal(frame['id'], 7);
+    assert.equal(frame['result']['isError'], true);
+    assert.match(frame['result']['content'][0]['text'] as string, /DAEMON_CANCELLED/);
+  });
+
+  it('close 在 pending 存在时收敛:abort 在飞调用并等错误帧写回', async () => {
+    const stdio = fakeStdio();
+    const written: string[] = [];
+    const bridge = createMcpBridge({
+      input: stdio.input,
+      output: { write(chunk: string) { written.push(chunk); return true; } },
+      callDaemon: cancelAwareCallDaemon(),
+      autoSession: false,
+    });
+    bridge.start();
+    stdio.push(JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'c', version: '0' } },
+    }));
+    stdio.push(JSON.stringify({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'capabilities_list', arguments: {} },
+    }));
+    await waitFor(() => written.length >= 1); // initialize 已应答,tools/call 在飞
+    const outcome = await Promise.race([
+      bridge.close().then(() => 'closed' as const),
+      new Promise<'hung'>((resolve) => { setTimeout(() => resolve('hung'), 1000).unref(); }),
+    ]);
+    assert.equal(outcome, 'closed');
+    // 在飞调用收到 close 的 abort:错误帧在 close 返回前写回
+    await waitFor(() => written.length >= 2);
+    const frame = JSON.parse(written[1]!);
+    assert.equal(frame['id'], 2);
+    assert.equal(frame['result']['isError'], true);
+    assert.match(frame['result']['content'][0]['text'] as string, /DAEMON_CANCELLED/);
+    stdio.end();
   });
 });

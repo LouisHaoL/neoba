@@ -10,6 +10,7 @@ import type { ChildProcess } from 'node:child_process';
 export const BASE_URL_ENV = 'NEOBA_BASE_URL';
 export const TOKEN_FILE_ENV = 'NEOBA_TOKEN_FILE';
 export const TOKEN_ENV = 'NEOBA_TOKEN';
+export const TIMEOUT_ENV = 'NEOBA_TIMEOUT_MS';
 
 /** cli.ts 的绝对路径(随本模块位置解析,便于被外部包引用)。 */
 export function bridgeCliPath(): string {
