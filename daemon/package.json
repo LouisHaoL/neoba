@@ -5,7 +5,7 @@
   "type": "module",
   "license": "Apache-2.0",
   "bin": { "neoba": "src/cli/main.ts" },
-  "engines": { "node": ">=22.6" },
+  "engines": { "node": ">=22.18" },
   "scripts": {
     "test": "node --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
