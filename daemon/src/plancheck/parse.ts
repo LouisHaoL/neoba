@@ -13,7 +13,9 @@ const NODE_ID_RE = /^[a-z][a-z0-9_-]*$/;
 const PRESET_NAME_RE = /^[a-z0-9][a-z0-9._/-]*$/;
 const OUTPUT_BINDING_RE = /^[a-z0-9_-]+\.outputs\.[a-z0-9_-]+$/;
 const CAP_ID_RE = /^[a-z][a-z0-9-]*:[a-z0-9][a-z0-9._-]*$/;
-const CAP_WILDCARD_RE = /^[a-z][a-z0-9-*]*:\*$/;
+// 与 common.schema.json 的 cap_id_or_wildcard 前缀分支一致(#24):
+// "ns:*" 形态的前缀通配,名称段不允许再含 "*"("a*:*"/"**:*" 是漂移,拒绝)。
+const CAP_WILDCARD_RE = /^[a-z][a-z0-9-]*:\*$/;
 const MODEL_PATTERN_RE = /^(\*|[A-Za-z0-9][A-Za-z0-9._-]*(\/\*)?)$/;
 const RETRY_ON: readonly RetryTrigger[] = ['crash', 'timeout'];
 
@@ -277,87 +279,92 @@ export function parseWorkflow(raw: unknown): WorkflowDoc {
     return out;
   };
 
+  // outputs/feedback/evidence 为 schema required(workflow.schema.json):缺失
+  // 即报 issue(#24),不再静默落空数组掩盖漂移。
+  if (root['outputs'] === undefined) {
+    issues.push({ field: 'outputs', message: '必填字段缺失(schema required)' });
+  }
   const outputs = parseBindings(root['outputs'], 'outputs', OUTPUT_KEYS, true);
   let feedback: WorkflowDoc['feedback'] = Object.freeze([]);
   const rawFeedback = root['feedback'];
-  if (rawFeedback !== undefined) {
-    if (!Array.isArray(rawFeedback)) {
-      issues.push({ field: 'feedback', message: '必须是数组' });
-    } else {
-      const edges: { from: string; to: string; max_traversals: number }[] = [];
-      rawFeedback.forEach((item, i) => {
-        const f = `feedback[${i}]`;
-        if (!isPlainObject(item)) {
-          issues.push({ field: f, message: '必须是对象' });
-          return;
-        }
-        unknownFields(item, FEEDBACK_KEYS, f, issues);
-        const from = item['from'];
-        const to = item['to'];
-        const max = item['max_traversals'];
-        let ok = true;
-        if (typeof from !== 'string' || !NODE_ID_RE.test(from)) {
-          issues.push({ field: `${f}.from`, message: `必须匹配 ${NODE_ID_RE.source}` });
-          ok = false;
-        }
-        if (typeof to !== 'string' || !NODE_ID_RE.test(to)) {
-          issues.push({ field: `${f}.to`, message: `必须匹配 ${NODE_ID_RE.source}` });
-          ok = false;
-        }
-        if (!isInt(max) || max < 0) {
-          issues.push({ field: `${f}.max_traversals`, message: '必须是 ≥0 的整数' });
-          ok = false;
-        }
-        if (ok) edges.push({ from: from as string, to: to as string, max_traversals: max as number });
-      });
-      feedback = Object.freeze(edges);
-    }
+  if (rawFeedback === undefined) {
+    issues.push({ field: 'feedback', message: '必填字段缺失(schema required)' });
+  } else if (!Array.isArray(rawFeedback)) {
+    issues.push({ field: 'feedback', message: '必须是数组' });
+  } else {
+    const edges: { from: string; to: string; max_traversals: number }[] = [];
+    rawFeedback.forEach((item, i) => {
+      const f = `feedback[${i}]`;
+      if (!isPlainObject(item)) {
+        issues.push({ field: f, message: '必须是对象' });
+        return;
+      }
+      unknownFields(item, FEEDBACK_KEYS, f, issues);
+      const from = item['from'];
+      const to = item['to'];
+      const max = item['max_traversals'];
+      let ok = true;
+      if (typeof from !== 'string' || !NODE_ID_RE.test(from)) {
+        issues.push({ field: `${f}.from`, message: `必须匹配 ${NODE_ID_RE.source}` });
+        ok = false;
+      }
+      if (typeof to !== 'string' || !NODE_ID_RE.test(to)) {
+        issues.push({ field: `${f}.to`, message: `必须匹配 ${NODE_ID_RE.source}` });
+        ok = false;
+      }
+      if (!isInt(max) || max < 0) {
+        issues.push({ field: `${f}.max_traversals`, message: '必须是 ≥0 的整数' });
+        ok = false;
+      }
+      if (ok) edges.push({ from: from as string, to: to as string, max_traversals: max as number });
+    });
+    feedback = Object.freeze(edges);
   }
 
   let evidence: WorkflowDoc['evidence'] = Object.freeze([]);
   const rawEvidence = root['evidence'];
-  if (rawEvidence !== undefined) {
-    if (!Array.isArray(rawEvidence)) {
-      issues.push({ field: 'evidence', message: '必须是数组' });
-    } else {
-      const decls: WorkflowDoc['evidence'][number][] = [];
-      rawEvidence.forEach((item, i) => {
-        const f = `evidence[${i}]`;
-        if (!isPlainObject(item)) {
-          issues.push({ field: f, message: '必须是对象' });
-          return;
-        }
-        unknownFields(item, EVIDENCE_KEYS, f, issues);
-        const node = item['node'];
-        const artifact = item['artifact'];
-        const mustExist = item['must_exist'];
-        const shaRecorded = item['sha256_recorded'];
-        let ok = true;
-        if (typeof node !== 'string' || !NODE_ID_RE.test(node)) {
-          issues.push({ field: `${f}.node`, message: `必须匹配 ${NODE_ID_RE.source}` });
+  if (rawEvidence === undefined) {
+    issues.push({ field: 'evidence', message: '必填字段缺失(schema required)' });
+  } else if (!Array.isArray(rawEvidence)) {
+    issues.push({ field: 'evidence', message: '必须是数组' });
+  } else {
+    const decls: WorkflowDoc['evidence'][number][] = [];
+    rawEvidence.forEach((item, i) => {
+      const f = `evidence[${i}]`;
+      if (!isPlainObject(item)) {
+        issues.push({ field: f, message: '必须是对象' });
+        return;
+      }
+      unknownFields(item, EVIDENCE_KEYS, f, issues);
+      const node = item['node'];
+      const artifact = item['artifact'];
+      const mustExist = item['must_exist'];
+      const shaRecorded = item['sha256_recorded'];
+      let ok = true;
+      if (typeof node !== 'string' || !NODE_ID_RE.test(node)) {
+        issues.push({ field: `${f}.node`, message: `必须匹配 ${NODE_ID_RE.source}` });
+        ok = false;
+      }
+      if (typeof artifact !== 'string' || !/^[a-z][a-z0-9_-]*$/.test(artifact)) {
+        issues.push({ field: `${f}.artifact`, message: '必须是合法工件名' });
+        ok = false;
+      }
+      for (const key of ['must_exist', 'sha256_recorded'] as const) {
+        if (typeof item[key] !== 'boolean') {
+          issues.push({ field: `${f}.${key}`, message: '必须是布尔值(必填)' });
           ok = false;
         }
-        if (typeof artifact !== 'string' || !/^[a-z][a-z0-9_-]*$/.test(artifact)) {
-          issues.push({ field: `${f}.artifact`, message: '必须是合法工件名' });
-          ok = false;
-        }
-        for (const key of ['must_exist', 'sha256_recorded'] as const) {
-          if (typeof item[key] !== 'boolean') {
-            issues.push({ field: `${f}.${key}`, message: '必须是布尔值(必填)' });
-            ok = false;
-          }
-        }
-        if (ok) {
-          decls.push({
-            node: node as string,
-            artifact: artifact as string,
-            must_exist: mustExist as boolean,
-            sha256_recorded: shaRecorded as boolean,
-          });
-        }
-      });
-      evidence = Object.freeze(decls);
-    }
+      }
+      if (ok) {
+        decls.push({
+          node: node as string,
+          artifact: artifact as string,
+          must_exist: mustExist as boolean,
+          sha256_recorded: shaRecorded as boolean,
+        });
+      }
+    });
+    evidence = Object.freeze(decls);
   }
 
   if (issues.length > 0) throw new WorkflowInvalid(issues);

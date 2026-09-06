@@ -23,6 +23,7 @@ import {
   checkPatternArray,
   isNonEmptyString,
   isPlainObject,
+  unknownFields,
 } from './validation.ts';
 import type {
   Base,
@@ -34,6 +35,28 @@ import type {
 } from './types.ts';
 
 export const API = 'preset/1.0';
+
+/** preset.schema.json 冻结的键集(additionalProperties: false)。 */
+const ROOT_KEYS = [
+  'api',
+  'name',
+  'description',
+  'base',
+  'skills',
+  'model',
+  'idempotent',
+  'baseline_grants',
+  'io_contracts',
+  'escalation_policy',
+  // protocol/spec_version 已由上方文档类根类型专属检查报告,包含在此以免重复记条。
+  'protocol',
+  'spec_version',
+] as const;
+const MODEL_KEYS = ['tier', 'fallback'] as const;
+const GRANT_KEYS = ['cap', 'scope'] as const;
+const IO_CONTRACT_KEYS = ['inputs', 'outputs'] as const;
+const IO_PORT_KEYS = ['name', 'type'] as const;
+const ESCALATION_KEYS = ['auto_approve', 'require_approval'] as const;
 
 /** 解析并校验预设 JSON 文档(一次报出全部问题;idempotent 缺省 false)。 */
 export function parsePreset(raw: unknown): Preset {
@@ -54,6 +77,8 @@ export function parsePreset(raw: unknown): Preset {
     '文档类根类型禁止携带 spec_version(版本走 api 轴)',
   );
   issues.addIf(raw['api'] !== API, 'api', '必须为 "preset/1.0"');
+  // 未知字段 fail-fast(#24):带 typo 的键(如 riskLevel)必须报错而非静默丢弃。
+  unknownFields(raw, ROOT_KEYS, 'root', issues);
   checkPattern(
     issues,
     'name',
@@ -80,6 +105,7 @@ export function parsePreset(raw: unknown): Preset {
     if (!isPlainObject(model)) {
       issues.add('model', '必须是对象');
     } else {
+      unknownFields(model, MODEL_KEYS, 'model', issues);
       checkEnum(issues, 'model.tier', model['tier'], TIERS);
       if (model['fallback'] !== undefined) {
         const fallback = model['fallback'];
@@ -111,6 +137,7 @@ export function parsePreset(raw: unknown): Preset {
         issues.add(field, '必须是对象');
         continue;
       }
+      unknownFields(grant, GRANT_KEYS, field, issues);
       checkPattern(issues, `${field}.cap`, grant['cap'], CAP_ID_RE, '<namespace>:<name>');
       checkEnum(issues, `${field}.scope`, grant['scope'], SCOPES);
     }
@@ -121,6 +148,7 @@ export function parsePreset(raw: unknown): Preset {
   if (!isPlainObject(io)) {
     issues.add('io_contracts', '必须是对象');
   } else {
+    unknownFields(io, IO_CONTRACT_KEYS, 'io_contracts', issues);
     for (const direction of ['inputs', 'outputs'] as const) {
       const ports = io[direction];
       if (!Array.isArray(ports)) {
@@ -134,6 +162,7 @@ export function parsePreset(raw: unknown): Preset {
           issues.add(field, '必须是对象');
           continue;
         }
+        unknownFields(port, IO_PORT_KEYS, field, issues);
         checkPattern(issues, `${field}.name`, port['name'], ARTIFACT_NAME_RE, '^[a-z][a-z0-9_-]*$');
         checkPattern(issues, `${field}.type`, port['type'], IO_TYPE_RE, '^[a-z][a-z0-9_.:-]*$');
       }
@@ -146,6 +175,7 @@ export function parsePreset(raw: unknown): Preset {
   if (!isPlainObject(escalation)) {
     issues.add('escalation_policy', '必须是对象');
   } else {
+    unknownFields(escalation, ESCALATION_KEYS, 'escalation_policy', issues);
     for (const key of ['auto_approve', 'require_approval'] as const) {
       checkPatternArray(
         issues,

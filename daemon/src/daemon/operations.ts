@@ -39,6 +39,7 @@ import { parseIntent, parseOutputBinding } from '../plancheck/index.ts';
 import { WorkflowEngine, RunNotPaused, RunUnknown, baselineScopeQueue } from '../engine/index.ts';
 import type { WorkflowRunResult } from '../engine/index.ts';
 import { BudgetLedger } from '../budget/index.ts';
+import { SECRET_ID_RE } from '../secrets/validate.ts';
 import { TIERS } from '../modelscore/index.ts';
 import type { ModelFeedback, Tier } from '../modelscore/index.ts';
 import { recordFeedback } from '../modelscore/index.ts';
@@ -623,8 +624,15 @@ export class Operations {
 
     let secretIds: string[] | undefined;
     if (p['secret_ids'] !== undefined && p['secret_ids'] !== null) {
-      if (!Array.isArray(p['secret_ids']) || (p['secret_ids'] as unknown[]).some((s) => typeof s !== 'string' || s.length === 0)) {
-        throw new InvalidParams('workflow.run: params.secret_ids 必须是非空字符串数组', { field: 'secret_ids' });
+      // pattern 对齐 common.schema.json#/$defs/secret_id(#24):非小写标识符
+      // (如 MY_TOKEN)不得流入容器 env 注入链路。
+      if (
+        !Array.isArray(p['secret_ids']) ||
+        (p['secret_ids'] as unknown[]).some((s) => typeof s !== 'string' || s.length === 0 || !SECRET_ID_RE.test(s))
+      ) {
+        throw new InvalidParams('workflow.run: params.secret_ids 必须是非空字符串数组且每项匹配 secret_id pattern(^[a-z][a-z0-9_.-]*$)', {
+          field: 'secret_ids',
+        });
       }
       secretIds = [...(p['secret_ids'] as string[])];
     }

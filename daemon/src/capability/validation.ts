@@ -46,6 +46,24 @@ export class Issues {
   }
 }
 
+/**
+ * 未知字段检查(比照 plancheck/parse.ts 的 unknownFields 机制):schema 冻结为
+ * additionalProperties: false,带 typo 的键(如 riskLevel)不允许被静默丢弃,
+ * 逐个列出文档路径 + 未知键名,由调用方随其余 issue 一次性 fail-fast。
+ */
+export function unknownFields(
+  raw: Record<string, unknown>,
+  allowed: readonly string[],
+  field: string,
+  issues: Issues,
+): void {
+  for (const key of Object.keys(raw)) {
+    if (!allowed.includes(key)) {
+      issues.add(`${field}.${key}`, '未知字段(additionalProperties: false)');
+    }
+  }
+}
+
 /** 枚举成员校验:合法返回原值,否则记一条 issue。 */
 export function checkEnum(
   issues: Issues,
