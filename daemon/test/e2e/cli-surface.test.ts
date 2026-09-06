@@ -118,6 +118,9 @@ describe('e2e · CLI workflow check / export', () => {
         '--level', level,
         '--presets', join(REPO_ROOT, 'presets', 'examples'),
         '--intent', join(REPO_ROOT, 'presets', 'examples', 'intent.json'),
+        // issue #25 口径对齐:示例 preset 声明 model.tier,export 与 check
+        // 同一门禁,必须带 --models 注册表,否则拒导(坏包不出门)。
+        '--models', join(REPO_ROOT, 'presets', 'examples', 'models.json'),
         '--out', target,
       ]);
       assert.equal(exported.code, 0, `export ${level}:${exported.stdout}\n${exported.stderr}`);
