@@ -173,7 +173,7 @@ export class Operations {
   async call(method: string, params: unknown, identity: RequestIdentity = ADMIN_IDENTITY): Promise<unknown> {
     switch (method) {
       case 'session.init':
-        return this.sessionInit(params);
+        return this.sessionInit(params, identity);
       case 'capabilities.list':
         return { capabilities: this.#ctx.registry.capabilities };
       case 'task.create':
@@ -224,7 +224,27 @@ export class Operations {
     return OPERATIONS.includes(method);
   }
 
-  async sessionInit(params: unknown): Promise<unknown> {
+  /**
+   * 会话握手(#9):session token 调用方只能在本人绑定的 tenant 下登记会话
+   * (principal.tenant 与绑定值不一致 → SESSION_FORBIDDEN,session 名可自选);
+   * admin(bootstrap token)不受限,可为任意 tenant 签发。缺省 identity =
+   * admin(现语义:直连 handleSessionInit 的单元测试与内部调用零漂移)。
+   */
+  async sessionInit(params: unknown, identity: RequestIdentity = ADMIN_IDENTITY): Promise<unknown> {
+    if (identity.kind === 'session') {
+      const boundTenant = identity.tenant ?? DEFAULT_TENANT;
+      const principal = (typeof params === 'object' && params !== null
+        ? (params as Record<string, unknown>)['principal']
+        : undefined) as unknown;
+      const declared = typeof principal === 'object' && principal !== null && !Array.isArray(principal)
+        ? (principal as Record<string, unknown>)['tenant']
+        : undefined;
+      if (typeof declared === 'string' && declared !== boundTenant) {
+        // 显式异值在此按越权拒绝,不给跨租户探测空间;缺失/类型不符的
+        // tenant 交由 parseSessionInit 报 InvalidHandshake(同样不放行)。
+        throw new SessionForbidden(boundTenant, identity.session ?? '');
+      }
+    }
     // HTTP 层 params 只有 SessionInitParams;handleSessionInit 期望完整请求文档。
     const result = handleSessionInit(
       { method: 'session.init', params },
