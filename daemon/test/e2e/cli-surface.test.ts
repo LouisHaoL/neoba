@@ -97,11 +97,13 @@ describe('e2e · CLI task / budget / approvals', () => {
 
 describe('e2e · CLI workflow check / export', () => {
   it('workflow check:示例工作流过检(presets + intent)', async () => {
+    // issue #5 口径对齐:示例 preset 声明 model.tier,check 必须带 --models 注册表。
     const out = await runNeoba([
       'workflow', 'check',
       join(REPO_ROOT, 'presets', 'examples', 'workflow.json'),
       '--presets', join(REPO_ROOT, 'presets', 'examples'),
       '--intent', join(REPO_ROOT, 'presets', 'examples', 'intent.json'),
+      '--models', join(REPO_ROOT, 'presets', 'examples', 'models.json'),
     ]);
     assert.equal(out.code, 0, `${out.stdout}\n${out.stderr}`);
   });

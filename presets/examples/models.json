@@ -1,0 +1,18 @@
+{
+  "api": "modelscore/1.0",
+  "models": [
+    {
+      "protocol": "1.0",
+      "spec_version": "1.0",
+      "model": "glm-4.7-air",
+      "tier_fit": { "fast": 0.9, "standard": 0.6, "heavy": 0.2 },
+      "score": {
+        "prior": { "fast": 0.8, "standard": 0.5, "heavy": 0.2 },
+        "observed": { "fast": null, "standard": null, "heavy": null },
+        "samples": { "fast": 0, "standard": 0, "heavy": 0 },
+        "dimensions": { "quality": 0.8, "success_rate": 0.8, "cost_efficiency": 0.7 }
+      },
+      "updated_at": "2026-09-05T00:00:00Z"
+    }
+  ]
+}

@@ -326,14 +326,16 @@ describe('P2 接线:审批 RPC(人机入口)', () => {
     assert.equal(decided['decision'], 'granted');
 
     // escalation 授予落事件流(grant.granted)+ grants.of manifest 可查。
+    // 注意:节点执行还会落 baseline 授予(issue #1 审计),断言须按 source 精确匹配。
     const events = await allEvents(handle);
-    const granted = events.find((e) => e.type === 'grant.granted') as unknown as Record<string, unknown>;
-    assert.ok(granted, '应落 grant.granted 事件');
-    assert.equal((granted['payload'] as Record<string, unknown>)['source'], 'escalation:req-wf-1');
+    const granted = events.find(
+      (e) => e.type === 'grant.granted' && (e.payload as Record<string, unknown>)['source'] === 'escalation:req-wf-1',
+    ) as unknown as Record<string, unknown>;
+    assert.ok(granted, '应落 escalation grant.granted 事件');
     assert.equal((granted['principal'] as Record<string, unknown>)['task'], taskId);
     const manifest = resultOf(await rpc(handle, 'grants.of', { agent_id: agentId }));
     const grants = (manifest['manifest'] as Record<string, unknown>)['grants'] as Record<string, unknown>[];
-    assert.equal(grants[0]?.['source'], 'escalation:req-wf-1');
+    assert.ok(grants.some((g) => g['source'] === 'escalation:req-wf-1'), `manifest 应含 escalation 授予:${JSON.stringify(grants)}`);
   });
 
   it('重复定案 → REQ_UNKNOWN 域错误(-32000)', async () => {
