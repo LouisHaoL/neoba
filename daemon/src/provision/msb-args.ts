@@ -3,7 +3,7 @@
  * 产出交给 CliRunner 执行;测试直接断言参数数组,不依赖真实 microsandbox。
  *
  * argv 形状按 microsandbox CLI 规格(msb ≥ 0.x):
- *   create --name N [-c CPUS] [--memory 512M] [--net-default deny] [-e K=V]
+ *   create --name N [-c CPUS] [--memory 512M] [--net-default deny] [--conf FILE]
  *          [-v SRC:DST[:OPT]] [-w DIR] [--label K=V] <IMAGE>
  *   exec  [-q] [-e K=V] [-w DIR] [-u USER] <NAME> -- <CMD...>(退出码透传)
  *   logs  [--tail N] <NAME>
@@ -12,6 +12,7 @@
  *   snapshot create <SNAP> --from <NAME> [--label K=V]
  *   run --from-snapshot <SNAP> --name <NAME> --detach
  */
+import { InvalidSpecError } from "./errors.ts";
 import { mergeLabels } from "./labels.ts";
 import { containerName } from "./docker-args.ts";
 import type { ExecOptions, LogsOptions, SandboxSpec } from "./types.ts";
@@ -32,8 +33,20 @@ export function formatMemoryMiB(bytes: number): string {
   return `${mib}M`;
 }
 
-/** msb create 全量参数(idle 拉起;基座命令一律经 exec 下发)。 */
-export function buildCreateArgs(spec: SandboxSpec, id: string, createdAt: string): string[] {
+/**
+ * msb create 全量参数(idle 拉起;基座命令一律经 exec 下发)。
+ *
+ * env 不经 `-e K=V` 上命令行(issue #11):msb CLI 无 --env-file 等价物,
+ * 采用其文件化注入机制 `--conf <file>`(sparse 根配置,YAML env 映射,
+ * 由 provider 写临时文件、CLI 结束后删除,见 env-file.ts)。spec.env 非空
+ * 但缺 confFile → InvalidSpecError,防明文回归。
+ */
+export function buildCreateArgs(
+  spec: SandboxSpec,
+  id: string,
+  createdAt: string,
+  confFile?: string,
+): string[] {
   const args: string[] = ["create", "--name", sandboxName(id)];
 
   for (const [k, v] of Object.entries(mergeLabels(spec, "microsandbox", id, createdAt))) {
@@ -52,7 +65,15 @@ export function buildCreateArgs(spec: SandboxSpec, id: string, createdAt: string
   args.push("--net-default", network.mode === "none" ? "deny" : "allow");
 
   if (spec.workdir !== undefined) args.push("-w", spec.workdir);
-  for (const [k, v] of Object.entries(spec.env ?? {})) args.push("-e", `${k}=${v}`);
+  const envEntries = Object.entries(spec.env ?? {});
+  if (envEntries.length > 0) {
+    if (confFile === undefined) {
+      throw new InvalidSpecError(
+        "spec.env 非空但未提供 conf 文件路径:env 明文禁止经 `-e K=V` 上命令行(#11)",
+      );
+    }
+    args.push("--conf", confFile);
+  }
   for (const m of spec.mounts ?? []) {
     // msb volume 语义:SOURCE:DEST[:OPTIONS];缺省 rw,ro 以 options 表达
     args.push("-v", m.mode === "ro" ? `${m.source}:${m.target}:ro` : `${m.source}:${m.target}`);
@@ -62,7 +83,12 @@ export function buildCreateArgs(spec: SandboxSpec, id: string, createdAt: string
   return args;
 }
 
-/** msb exec:--quiet 抑制进度输出;`--` 后为沙箱内命令;退出码透传。 */
+/**
+ * msb exec:--quiet 抑制进度输出;`--` 后为沙箱内命令;退出码透传。
+ * opts.env 仍走 `-e K=V`:exec 的 env 由代码内调用方传入(当前无 secret 流经,
+ * secret 只在 create 期经 spec.env 注入),且 msb exec 无文件化 env 机制
+ * (secret-conf 是 create 期语义);若有调用方需经 exec 传凭据,须先补文件化通道。
+ */
 export function buildExecArgs(name: string, cmd: string[], opts?: ExecOptions): string[] {
   const args: string[] = ["exec", "-q"];
   if (opts?.user !== undefined) args.push("-u", opts.user);

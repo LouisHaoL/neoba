@@ -23,6 +23,7 @@ import {
   PrerequisiteNotMetError,
   SandboxError,
 } from "./errors.ts";
+import { formatMsbConfYaml, removeEnvFile, writeEnvFile } from "./env-file.ts";
 import {
   buildCreateArgs,
   buildExecArgs,
@@ -96,7 +97,18 @@ export class MicrosandboxProvider implements SandboxProvider {
     this.#registry.add(handle);
 
     handle.status = "provisioning";
-    await this.#run(buildCreateArgs(spec, id, createdAt));
+    // env 不上命令行(issue #11):msb 无 --env-file,走其文件化注入机制
+    // `--conf <file>`(sparse 根配置 YAML env 映射),0600 临时文件用后即删
+    // (含失败路径);无 env 保持 argv 零变化。
+    const env = spec.env ?? {};
+    const confFile = Object.keys(env).length > 0
+      ? await writeEnvFile(formatMsbConfYaml(env), ".yaml")
+      : null;
+    try {
+      await this.#run(buildCreateArgs(spec, id, createdAt, confFile ?? undefined));
+    } finally {
+      if (confFile !== null) await removeEnvFile(confFile);
+    }
     handle.status = "running";
     return handle;
   }

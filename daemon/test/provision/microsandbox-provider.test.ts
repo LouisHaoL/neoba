@@ -8,6 +8,7 @@
  * - userns 天然满足(microVM),spec.command / allowlist 显式拒绝。
  */
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   CliOutputParseError,
@@ -18,6 +19,7 @@ import {
   NEOBA_MANAGED_LABEL,
   NotSupportedError,
   PrerequisiteNotMetError,
+  buildMsbCreateArgs,
   formatMemoryMiB,
 } from "../../src/provision/index.ts";
 import type { CliResult, CliRunner, SandboxSpec } from "../../src/provision/index.ts";
@@ -84,7 +86,7 @@ describe("provision/MicrosandboxProvider(注入假 runner)", () => {
     assert.equal(handle.labels["neoba.user"], "worker");
   });
 
-  it("网络 bridge → --net-default allow;env / workdir 落 argv", async () => {
+  it("网络 bridge → --net-default allow;workdir 落 argv;env 经 --conf 文件注入", async () => {
     const { provider, calls } = makeProvider();
     await provider.create({
       ...SPEC,
@@ -94,10 +96,71 @@ describe("provision/MicrosandboxProvider(注入假 runner)", () => {
     const args = calls[0]!;
     const idxNet = args.indexOf("--net-default");
     assert.equal(args[idxNet! + 1], "allow");
-    const idxEnv = args.indexOf("-e");
-    assert.equal(args[idxEnv! + 1], "FOO=bar");
+    const idxConf = args.indexOf("--conf");
+    assert.ok(idxConf > -1);
     const idxWd = args.indexOf("-w");
     assert.equal(args[idxWd! + 1], "/workspace");
+    // 用后即删:CLI 调用结束后 conf 临时文件不存在
+    assert.equal(existsSync(args[idxConf! + 1]!), false);
+  });
+
+  it("secret 明文不落 argv(#11):create 经 --conf 注入,文件内容正确且用后即删", async () => {
+    /** 捕获 CLI 运行中的 conf 文件路径与内容(先于用后即删)。 */
+    const paths: string[] = [];
+    const contents: string[] = [];
+    const { provider, calls } = makeProvider((args) => {
+      const i = args.indexOf("--conf");
+      if (i > -1) {
+        paths.push(args[i + 1]!);
+        contents.push(readFileSync(args[i + 1]!, "utf8"));
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const handle = await provider.create({
+      ...SPEC,
+      env: { NEBOBA_SECRET_TOKEN: "s3cr3t-value!", FOO: "bar" },
+    });
+
+    // argv 全量(每次调用逐元素)不含 secret 明文与 -e K=V 形态
+    assert.ok(!calls.flat().some((a) => a.includes("s3cr3t-value!") || a === "-e"));
+    assert.ok(!calls.flat().some((a) => a.includes("FOO=bar")));
+    // conf 文件内容为 sparse 根配置的 YAML env 映射(运行中读到)
+    assert.equal(
+      contents[0],
+      `env:\n  "NEBOBA_SECRET_TOKEN": "s3cr3t-value!"\n  "FOO": "bar"\n`,
+    );
+    // 用后即删
+    assert.equal(paths.length, 1);
+    assert.equal(existsSync(paths[0]!), false);
+    assert.equal(handle.status, "running");
+  });
+
+  it("create 失败路径同样清理 conf 临时文件(用后即删)", async () => {
+    const paths: string[] = [];
+    const { provider } = makeProvider((args) => {
+      const i = args.indexOf("--conf");
+      if (args[0] === "create" && i > -1) paths.push(args[i + 1]!);
+      return args[0] === "create"
+        ? { code: 1, stdout: "", stderr: "no /dev/kvm, KVM not available" }
+        : { code: 0, stdout: "", stderr: "" };
+    });
+    await assert.rejects(
+      provider.create({ ...SPEC, env: { NEBOBA_SECRET_TOKEN: "s3cr3t" } }),
+      CommandFailedError,
+    );
+    assert.equal(paths.length, 1);
+    assert.equal(existsSync(paths[0]!), false);
+  });
+
+  it("纯映射:env 非空但未提供 conf 文件路径 → InvalidSpecError(防 -e K=V 明文回归)", () => {
+    assert.throws(
+      () => buildMsbCreateArgs({ image: "img", env: { CI: "1" } }, "id-1234", "2026-09-04T00:00:00.000Z"),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidSpecError);
+        assert.equal(err.code, "invalid_spec");
+        return true;
+      },
+    );
   });
 
   it("exec:走 msb exec -q,opts 与缺省 user(spec.user)生效,退出码透传", async () => {

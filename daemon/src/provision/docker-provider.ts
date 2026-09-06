@@ -12,6 +12,7 @@ import {
   ProviderUnavailableError,
   SandboxError,
 } from "./errors.ts";
+import { formatDockerEnvFile, removeEnvFile, writeEnvFile } from "./env-file.ts";
 import {
   buildCreateArgs,
   buildExecArgs,
@@ -83,8 +84,18 @@ export class DockerProvider implements SandboxProvider {
     this.#registry.add(handle);
 
     handle.status = "provisioning";
-    await this.#run(buildCreateArgs(spec, id, createdAt));
-    await this.#run(buildStartArgs(id));
+    // env 不上命令行(issue #11):有 env 时写 0600 临时文件走 --env-file,
+    // CLI 结束后即删(含失败路径);无 env 保持 argv 零变化。
+    const env = spec.env ?? {};
+    const envFile = Object.keys(env).length > 0
+      ? await writeEnvFile(formatDockerEnvFile(env), ".env")
+      : null;
+    try {
+      await this.#run(buildCreateArgs(spec, id, createdAt, envFile ?? undefined));
+      await this.#run(buildStartArgs(id));
+    } finally {
+      if (envFile !== null) await removeEnvFile(envFile);
+    }
     handle.status = "running";
     return handle;
   }

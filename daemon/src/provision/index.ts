@@ -53,6 +53,12 @@ export {
   type CliRunner,
 } from "./runner.ts";
 export { validateSpec } from "./validate.ts";
+export {
+  formatDockerEnvFile,
+  formatMsbConfYaml,
+  removeEnvFile,
+  writeEnvFile,
+} from "./env-file.ts";
 export { DockerProvider, type DockerProviderOptions, type UsernsProbe } from "./docker-provider.ts";
 export {
   MemoryProvider,
