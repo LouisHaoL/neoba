@@ -56,6 +56,37 @@ describe('cli args: parseArgs', () => {
   });
 });
 
+describe('cli args: allowedFlags 白名单(issue #28)', () => {
+  it('白名单外的 --flag 报用法错误,并列出该命令合法选项', () => {
+    assert.throws(
+      () => parseArgs(['--registryy', 'x'], ['registry'], ['registry', 'port']),
+      (err: unknown) => {
+        assert.ok(err instanceof CliUsageError);
+        assert.match((err as Error).message, /未知选项 --registryy/);
+        assert.match((err as Error).message, /--port, --registry/);
+        return true;
+      },
+    );
+  });
+
+  it('--flag=value 形态的未知 flag 同样报错;合法值型 flag 不受影响', () => {
+    assert.throws(() => parseArgs(['--registryy=x'], [], ['registry']), CliUsageError);
+    const ok = parseArgs(['--registry', 'x'], ['registry'], ['registry']);
+    assert.equal(flagString(ok.flags, 'registry'), 'x');
+  });
+
+  it('位置参数不被误判为未知 flag', () => {
+    const r = parseArgs(['t1', 'status', '--json'], ['state-dir'], ['state-dir', 'json']);
+    assert.deepEqual(r.positionals, ['t1', 'status']);
+    assert.equal(r.flags['json'], true);
+  });
+
+  it('-- 终止符之后的 token 即使形如未知 flag 也不报错(算位置参数)', () => {
+    const r = parseArgs(['--', '--registryy', 'x'], [], ['registry']);
+    assert.deepEqual(r.positionals, ['--registryy', 'x']);
+  });
+});
+
 describe('cli args: routeCommand', () => {
   it('首个非选项 token 是命令名,其余透传', () => {
     assert.deepEqual(routeCommand(['doctor', '--json']), { name: 'doctor', args: ['--json'] });

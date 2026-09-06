@@ -16,6 +16,8 @@
  * 库用法(测试/嵌入式):
  *   const code = await runCli(argv, io, deps);
  * 全局:--help / --version;未知命令报错并列出可用命令(退出码 2)。
+ * issue #28:子命令携带 --help/-h 在命令层拦截(打印该命令用法,退出码 0,
+ * 不执行命令);各命令声明合法 flag 白名单,白名单外的 --flag 报错(退出码 2)。
  */
 
 import { pathToFileURL } from 'node:url';
@@ -23,7 +25,7 @@ import { pathToFileURL } from 'node:url';
 import { typeStripGuard } from '../runtime-version.ts';
 import { CliUsageError } from './args.ts';
 import { defaultDeps } from './deps.ts';
-import { renderHelp, renderVersion } from './help.ts';
+import { renderCommandHelp, renderHelp, renderVersion } from './help.ts';
 import { commandRegistry } from './registry.ts';
 import { processIo } from './types.ts';
 import type { CliDeps, CliIo } from './types.ts';
@@ -62,6 +64,18 @@ export async function runCli(
     io.err(`可用命令: ${Object.keys(commands).join(', ')}`);
     io.err('运行 neoba --help 查看详情');
     return 2;
+  }
+
+  // --help 命令层拦截(issue #28):子命令参数里出现 --help/-h 时,打印该命令
+  // 用法后退出 0,绝不执行命令 —— 否则 `neoba start --help` 会真的前台拉起
+  // daemon 永久阻塞。取舍:拦截任意位置的 --help/-h(比只看第一个 flag 更稳的
+  // 超集,保证 --help 永远到不了命令执行);没有命令会把 --help 当合法值。
+  for (const token of argv.slice(1)) {
+    if (token === '--') break;
+    if (token === '--help' || token === '-h') {
+      io.out(renderCommandHelp(command));
+      return 0;
+    }
   }
 
   try {

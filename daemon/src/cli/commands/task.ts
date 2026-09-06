@@ -27,7 +27,7 @@ export const taskCommand: Command = {
   summary: '任务操作:status / pause / resume / cancel',
   usage: 'neoba task <task_id> <status|pause|resume|cancel> [--state-dir DIR] [--json]',
   async run(args, { io, deps }) {
-    const { flags, positionals } = parseArgs(args, ['state-dir']);
+    const { flags, positionals } = parseArgs(args, ['state-dir'], ['state-dir', 'json']);
     const asJson = flagBool(flags, 'json');
     const taskId = positionals[0];
     const action = positionals[1];

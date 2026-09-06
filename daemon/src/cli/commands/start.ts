@@ -14,13 +14,18 @@ import { DaemonPortInUse } from '../../daemon/index.ts';
 import { flagBool, flagInt, flagString, parseArgs, CliUsageError } from '../args.ts';
 import type { Command } from '../types.ts';
 
+/** start 接受的值型 flag。 */
+const START_VALUE_FLAGS = ['state-dir', 'port', 'presets', 'registry', 'models'] as const;
+/** start 的合法 flag 白名单(issue #28):拼写错误不再被静默吞掉。 */
+const START_ALLOWED_FLAGS: readonly string[] = [...START_VALUE_FLAGS, 'foreground', 'daemonize'];
+
 export const startCommand: Command = {
   name: 'start',
   summary: '拉起 neoba daemon(前台运行,Ctrl+C 优雅关闭)',
   usage:
     'neoba start [--state-dir DIR] [--port N] [--presets DIR] [--registry FILE] [--models FILE] [--foreground]',
   async run(args, { io, deps }) {
-    const { flags } = parseArgs(args, ['state-dir', 'port', 'presets', 'registry', 'models']);
+    const { flags } = parseArgs(args, START_VALUE_FLAGS, START_ALLOWED_FLAGS);
     if (flagBool(flags, 'daemonize')) {
       throw new CliUsageError('--daemonize not-supported:v0.2 仅支持前台运行');
     }

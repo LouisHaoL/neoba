@@ -13,6 +13,9 @@ const STATE_FILE_NAME = 'daemon-state.json';
 const TOKEN_FILE_NAME = 'token';
 const PROBE_TIMEOUT_MS = 1500;
 
+/** status 的合法 flag 白名单(issue #28)。 */
+const STATUS_ALLOWED_FLAGS: readonly string[] = ['state-dir', 'json'];
+
 interface DaemonStateFile {
   pid?: unknown;
   version?: unknown;
@@ -43,7 +46,7 @@ export const statusCommand: Command = {
   summary: '查看 daemon 状态(状态文件 + token + HTTP 探活)',
   usage: 'neoba status [--state-dir DIR] [--json]',
   async run(args, { io, deps }) {
-    const { flags } = parseArgs(args, ['state-dir']);
+    const { flags } = parseArgs(args, ['state-dir'], STATUS_ALLOWED_FLAGS);
     const asJson = flagBool(flags, 'json');
     const stateDir =
       flagString(flags, 'state-dir') ?? join(deps.homedir(), '.neoba');

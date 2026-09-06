@@ -17,7 +17,7 @@ export const mcpCommand: Command = {
   summary: '拉起 stdio MCP 桥(连本地 daemon,token 从状态目录读)',
   usage: 'neoba mcp [--state-dir DIR] [--port N]',
   async run(args, { io, deps }) {
-    const { flags } = parseArgs(args, ['state-dir', 'port']);
+    const { flags } = parseArgs(args, ['state-dir', 'port'], ['state-dir', 'port']);
     const stateDir =
       flagString(flags, 'state-dir') ?? join(deps.homedir(), '.neoba');
     const tokenFile = join(stateDir, 'token');

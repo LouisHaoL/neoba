@@ -21,7 +21,7 @@ function decideCommand(name: 'approve' | 'deny'): Command {
     summary,
     usage,
     async run(args, { io, deps }) {
-      const { flags, positionals } = parseArgs(args, ['state-dir', 'by', 'narrow-to']);
+      const { flags, positionals } = parseArgs(args, ['state-dir', 'by', 'narrow-to'], ['state-dir', 'by', 'narrow-to']);
       const reqId = positionals[0];
       if (reqId === undefined || reqId === '') {
         throw new CliUsageError('缺少 req_id');
