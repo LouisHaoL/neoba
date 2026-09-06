@@ -13,7 +13,14 @@
  *     (truncate 回最后一个完整行);末行合法 JSON 但缺换行符 → 视为完整,
  *     原样接受并补封换行符;
  *   - 非末行的非法 JSON / 空行 / seq 非单调 = 中途损坏(不是崩溃形态),
- *     抛 EventCorrupt,不静默跳过。
+ *     缺省抛 EventCorrupt,不静默跳过;quarantine=true(issue #21)时改为
+ *     隔离:坏行原样复制到 sidecar(`<分片>.jsonl.corrupt`,主文件字节不动,
+ *     避免"移动"需要的整文件重写与跨进程追加冲突),重放跳过并经
+ *     onQuarantined 上报 —— daemon 启动不再被单一坏行永久卡死。
+ *
+ * repair 截断的跨进程安全(issue #21):truncate 前重读文件与快照逐字节核对,
+ * 已被并发修改(运行中的 daemon 追加了新事件)则抛 EventRepairConflict 拒绝,
+ * 不按过时快照截掉别人的完整事件。
  *
  * 重放前向兼容(§3.0 "接收方必须忽略未知字段"同样适用于持久化日志):
  *   - 未知字段:不校验、不剥离,透传保留(升级 daemon 必须能重放旧日志);
@@ -29,10 +36,10 @@
  * 分片:可选 shard 策略(principal → 相对路径),默认单文件 events.jsonl;
  * seq 按分片文件独立计数。
  */
-import { mkdir, open, readdir, readFile, truncate } from 'node:fs/promises';
+import { appendFile, mkdir, open, readdir, readFile, truncate } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { EventCorrupt, EventLogClosed, InvalidEvent, InvalidPrincipal } from './errors.ts';
+import { EventBrokenTail, EventCorrupt, EventLogClosed, EventRepairConflict, InvalidEvent, InvalidPrincipal } from './errors.ts';
 import {
   EVENT_TYPES,
   type Event,
@@ -97,6 +104,8 @@ interface ShardState {
   handle: FileHandle | null;
   nextSeq: number;
   loaded: boolean;
+  /** repair=false 装载时发现崩溃残行(issue #21 附带):置位后拒绝 append。 */
+  brokenTail: boolean;
   queue: Promise<unknown>;
 }
 
@@ -105,6 +114,18 @@ export interface SkippedRecord {
   readonly line: number;
   /** 未知事件类型的 type 值(结构坏到读不出 type 时为 null)。 */
   readonly type: string | null;
+}
+
+/** 中段损坏行被隔离(quarantine)时的上报记录(issue #21)。 */
+export interface QuarantinedRecord {
+  /** 分片相对路径(sidecar 为 `<path>.corrupt`)。 */
+  readonly path: string;
+  /** 坏行行号(1 起)。 */
+  readonly line: number;
+  /** 隔离原因('非法 JSON' / '空行' 等)。 */
+  readonly reason: string;
+  /** 坏行原文(无结尾换行符;空行为空串)。 */
+  readonly raw: string;
 }
 
 export interface ReplayOptions {
@@ -117,6 +138,14 @@ export interface EventLogOptions {
   readonly shard?: ShardStrategy;
   /** 重放发现崩溃截断的末行时是否修剪(默认 true)。 */
   readonly repair?: boolean;
+  /**
+   * 中段损坏行隔离(issue #21):true 时坏行复制进 sidecar 并跳过重放,
+   * 不再抛 EventCorrupt;缺省 false(库层保守,坏行必须人工过目)。
+   * daemon 启动恒为 true(配合 correction 事件与 warning 上浮)。
+   */
+  readonly quarantine?: boolean;
+  /** 中段损坏行被隔离时的通知(quarantine=true 时)。 */
+  readonly onQuarantined?: (record: QuarantinedRecord) => void;
   /** 时钟注入(测试用),默认 Date.prototype.toISOString。 */
   readonly now?: () => string;
   /** 订阅者回调抛错时的上报口;缺省静默隔离(不影响追加)。 */
@@ -127,8 +156,10 @@ export class EventLog {
   readonly #root: string;
   readonly #shard: ShardStrategy | null;
   readonly #repair: boolean;
+  readonly #quarantine: boolean;
   readonly #now: () => string;
   readonly #onSubscriberError: ((err: unknown, event: Event) => void) | null;
+  readonly #onQuarantined: ((record: QuarantinedRecord) => void) | null;
   readonly #shards = new Map<string, ShardState>();
   readonly #subscribers = new Set<(event: Event) => void>();
   #closed = false;
@@ -137,8 +168,10 @@ export class EventLog {
     this.#root = root;
     this.#shard = opts.shard ?? null;
     this.#repair = opts.repair ?? true;
+    this.#quarantine = opts.quarantine ?? false;
     this.#now = opts.now ?? (() => new Date().toISOString());
     this.#onSubscriberError = opts.onSubscriberError ?? null;
+    this.#onQuarantined = opts.onQuarantined ?? null;
   }
 
   /** 打开(创建)事件日志根目录。目录不存在则创建;不扫描文件(分片懒加载)。 */
@@ -169,6 +202,11 @@ export class EventLog {
     const st = await this.#shardFor(input.principal);
     return this.#enqueue(st, async () => {
       await this.#ensureLoaded(st);
+      // repair=false 且末尾有崩溃残行:拒绝追加(issue #21 附带)。残行没有
+      // 结尾换行符,直接追加会与新事件拼成一行 → 两行永久损坏。本类不选
+      // "强制封行",因为 repair=false 的语义是不改写文件字节;修复残行是
+      // repair=true(修剪)的职责,这里只负责守住不把损坏扩大。
+      if (st.brokenTail) throw new EventBrokenTail(st.relPath);
       const seq = st.nextSeq;
       const event: Event<P> = Object.freeze({
         v: EVENT_LOG_VERSION,
@@ -279,7 +317,7 @@ export class EventLog {
   async #shardState(rel: string): Promise<ShardState> {
     let st = this.#shards.get(rel);
     if (st === undefined) {
-      st = { relPath: rel, handle: null, nextSeq: 1, loaded: false, queue: Promise.resolve() };
+      st = { relPath: rel, handle: null, nextSeq: 1, loaded: false, brokenTail: false, queue: Promise.resolve() };
       this.#shards.set(rel, st);
     }
     return st;
@@ -346,13 +384,26 @@ export class EventLog {
         break;
       }
       const line = buf.subarray(pos, nl);
-      if (line.length === 0) {
-        throw new EventCorrupt(st.relPath, lineNo, '空行');
-      }
-      const parsed = this.#parseLine(line, st.relPath, lineNo, prevSeq);
+      const parsed = line.length === 0 ? null : this.#parseLine(line, st.relPath, lineNo, prevSeq);
       if (parsed === null) {
-        // 有换行符结尾的行非法 = 不是崩溃截断形态,是真实损坏。
-        throw new EventCorrupt(st.relPath, lineNo, '非法 JSON');
+        // 有换行符结尾的行非法(或空行)= 不是崩溃截断形态,是中途损坏。
+        if (this.#quarantine) {
+          // 隔离(issue #21):坏行原样复制进 sidecar,重放跳过,主文件字节
+          // 不动 —— "移动"需要整文件重写,与运行中 daemon 的追加句柄冲突,
+          // 复制 + 跳过即可达成"不变砖 + 坏行留证"。sidecar 每次装载都会
+          // 追加(重复启动留重复记录,可接受:取证信息宁多勿缺)。
+          const reason = line.length === 0 ? '空行' : '非法 JSON';
+          const rawText = line.toString('utf8');
+          await appendFile(
+            `${full}.corrupt`,
+            JSON.stringify({ path: st.relPath, line: lineNo, reason, raw: rawText }) + '\n',
+            'utf8',
+          );
+          this.#onQuarantined?.({ path: st.relPath, line: lineNo, reason, raw: rawText });
+          pos = nl + 1;
+          continue;
+        }
+        throw new EventCorrupt(st.relPath, lineNo, line.length === 0 ? '空行' : '非法 JSON');
       }
       if (parsed.skip !== null) onSkipped?.(parsed.skip);
       else events.push(parsed.event);
@@ -360,10 +411,17 @@ export class EventLog {
       pos = nl + 1;
     }
 
-    if (truncatedFrom !== null && this.#repair) {
-      // Windows 注:O_APPEND 句柄上 ftruncate 会 EPERM,须独立句柄修剪;
-      // 此刻队列内无未落盘写入(每次 append 后都 fsync),并发安全。
-      await truncate(full, truncatedFrom);
+    if (truncatedFrom !== null) {
+      if (this.#repair) {
+        // Windows 注:O_APPEND 句柄上 ftruncate 会 EPERM,须独立句柄修剪。
+        // 跨进程安全(issue #21):truncate 前重读文件与快照核对,读取窗口内
+        // 被别的进程(运行中的 daemon)追加过则拒绝,不按过时快照截掉新事件。
+        await repairTruncatedTail(full, buf, truncatedFrom);
+      } else {
+        // repair=false 且发现残行:置位 brokenTail,后续 append 拒绝
+        // (防止新事件与残行拼行;见 append 内注释)。
+        st.brokenTail = true;
+      }
     }
     if (sealNewline) {
       const fh = await this.#ensureHandle(st);
@@ -442,4 +500,30 @@ export class EventLog {
       }
     }
   }
+}
+
+/**
+ * repair 截断的跨进程安全核验(issue #21,@internal 供 #loadShard 与回归测试)。
+ *
+ * 老实现的缺陷:truncate 基于 readFile 快照的偏移量,若快照之后有其它进程
+ * (daemon 运行中,CLI prune --plan 打开日志 repair=true)追加了新事件,
+ * 按快照修剪会把那些完整事件一并截掉 —— 而截断方的 nextSeq 快照不含它们,
+ * 事件凭空消失。修复:truncate 前重读文件,与快照逐字节比对;仅当文件仍是
+ * 快照原样(尾行还是当时看到的残行形态)才允许修剪;否则抛 EventRepairConflict。
+ */
+export async function repairTruncatedTail(full: string, snapshot: Buffer, cutFrom: number): Promise<void> {
+  let current: Buffer;
+  try {
+    current = await readFile(full);
+  } catch (err) {
+    throw new EventRepairConflict(full, `重读失败: ${String(err)}`);
+  }
+  if (!current.equals(snapshot)) {
+    const grew = current.length > snapshot.length;
+    throw new EventRepairConflict(
+      full,
+      `快照 ${snapshot.length} 字节,现文件 ${current.length} 字节(${grew ? '有新追加' : '内容有变化'})`,
+    );
+  }
+  await truncate(full, cutFrom);
 }

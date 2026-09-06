@@ -7,17 +7,20 @@
  * 恢复 = 重放 + 对账(注入 reconciler),TTL 从落盘时间戳重推导。
  * 运行时零第三方依赖,仅用 node 内置模块。
  */
-export { EventLog, EVENT_LOG_VERSION, shardByTask } from './log.ts';
+export { EventLog, EVENT_LOG_VERSION, repairTruncatedTail, shardByTask } from './log.ts';
 export type {
   EventLogOptions,
+  QuarantinedRecord,
   ReplayOptions,
   ShardStrategy,
   SkippedRecord,
 } from './log.ts';
 export {
+  EventBrokenTail,
   EventCorrupt,
   EventLogClosed,
   EventLogError,
+  EventRepairConflict,
   InvalidEvent,
   InvalidPrincipal,
 } from './errors.ts';

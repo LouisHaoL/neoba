@@ -31,6 +31,44 @@ export class EventCorrupt extends EventLogError {
   }
 }
 
+/**
+ * repair 截断的跨进程冲突(issue #21):truncate 前重读文件发现内容已偏离
+ * 快照(有其它进程 —— 通常是运行中的 daemon —— 在读取之后追加了新事件)。
+ * 此刻按快照修剪会把别人的完整事件截掉,拒绝 repair 并上抛,宁可让本次
+ * 重放失败也不静默丢事件。
+ */
+export class EventRepairConflict extends EventLogError {
+  readonly path: string;
+
+  constructor(path: string, detail: string) {
+    super(
+      'EVENT_LOG_REPAIR_CONFLICT',
+      `事件日志 ${path} 在读取后被并发修改,拒绝 repair 截断: ${detail}` +
+        '(按过快照修剪会丢掉新追加的完整事件;请等写入方退出后重试)',
+    );
+    this.path = path;
+  }
+}
+
+/**
+ * repair=false 打开时文件尾部存在崩溃残行(issue #21 附带):残行不带换行符,
+ * 此时追加会与新事件拼成一行,两行永久损坏。repair=false 的语义是不改写文件
+ * 字节,因此不封换行,改为拒绝 append(保守选择);需要追加请用 repair=true
+ * 打开一次修剪残行。
+ */
+export class EventBrokenTail extends EventLogError {
+  readonly path: string;
+
+  constructor(path: string) {
+    super(
+      'EVENT_LOG_BROKEN_TAIL',
+      `事件日志 ${path} 末尾存在崩溃残行且以 repair=false 打开(不修剪不封行);` +
+        '此刻追加会与新事件拼行造成永久损坏,已拒绝。请用 repair=true 重新打开修剪后再追加',
+    );
+    this.path = path;
+  }
+}
+
 /** principal 缺 tenant,或分片路径含非法段/路径穿越。 */
 export class InvalidPrincipal extends EventLogError {
   readonly detail: string;
