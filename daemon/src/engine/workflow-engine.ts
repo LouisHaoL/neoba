@@ -106,17 +106,25 @@ interface RunState {
     resolve: (result: WorkflowRunResult) => void;
     reject: (err: unknown) => void;
   };
-  /** 'paused' = loop 已因 budget 挂起退出(resume 重入);执行中外部暂停不改它。 */
+  /** 'paused' = 收口循环已因 budget 挂起退出(resume 重入);执行中外部暂停不改它。 */
   status: 'running' | 'paused';
   /**
-   * budget 排空窗口(loop 正在 #drain,gate 已 pause 但 status 尚为
-   * 'running'):此窗口内到达的 resume 记为待办,挂起落定后由 #drive 自动
-   * 续跑(否则 resume 落在已 resolve 的 done.promise 上被静默吞掉,
-   * 任务永远停在 paused —— 丢唤醒)。
+   * budget 排空窗口(loop 正在 #drain,gate 已 pause 但挂起尚未落定):
+   * 此窗口内到达的 resume 记为待办,由 #settle 的 while 在落定瞬间续跑
+   * (否则 resume 落在已 settle 的旧 promise 上被静默吞掉,任务永远停在
+   * paused —— 丢唤醒)。
    */
   budgetPausing: boolean;
-  /** budget 排空窗口内收到的 resume;#drive 消费后自动重入 loop。 */
+  /**
+   * 排空窗口 / 熔断窗口内收到的 resume;#settle 的 while 消费后自动重入
+   * loop。只在 #settle 返回处消费 —— 杜绝悬空标志(置了没人消费)。
+   */
   pendingResume: boolean;
+  /**
+   * 当前在飞的收口循环(#drive 或 resume 重入启动)。窗口内到达的 resume
+   * 等待它拿新终态,而不是已 settle 的 run() 旧 promise。
+   */
+  settling: Promise<WorkflowRunResult> | null;
 }
 
 export class WorkflowEngine {
@@ -160,6 +168,7 @@ export class WorkflowEngine {
       status: 'running',
       budgetPausing: false,
       pendingResume: false,
+      settling: null,
     };
     this.#runs.set(params.taskId, state);
     void this.#drive(state);
@@ -179,55 +188,73 @@ export class WorkflowEngine {
   }
 
   /**
-   * 恢复执行。两种挂起形态:
-   * - budget_paused(loop 已退出):重入 loop 续跑;
-   * - 执行中外部 pause(loop 阻塞在派发边界):原地唤醒,结果经 run() 的
-   *   promise 送达(resume 返回同一 promise)。
+   * 恢复执行。三种挂起形态:
+   * - budget_paused 已落定(loop 已退出):重入收口循环续跑;
+   * - 执行中外部 pause(loop 阻塞在派发边界):原地唤醒,结果经当前在飞
+   *   的收口循环送达;
+   * - budget 熔断窗口(executor 已在台账记下 hard、gate.pause 尚未落定):
+   *   记待办,由收口循环在挂起落定瞬间自动续跑 —— 与「已挂起」同语义。
+   * 健康运行中(无任何 pause 信号)resume 显式抛 RunNotPaused,不武装
+   * 自动续跑(否则真熔断时 #settle 的 while 会自动续跑,操作者的
+   * budget_paused 决策点 —— 续预算或终止 —— 被静默跳过)。
    */
   async resume(taskId: string): Promise<WorkflowRunResult> {
     const state = this.#runs.get(taskId);
     if (state === undefined) throw new RunUnknown(taskId);
     if (state.status === 'paused') {
+      // budget_paused 挂起:重入收口循环。与 #drive 复用同一 while 消费
+      // pendingResume —— 重入期间再次熔断、期间到达的新 resume 都在同一
+      // 处收口,不再产生悬空标志或过期 promise(窗口 b)。
       state.status = 'running';
       state.gate.resume();
-      try {
-        const result = await this.#loop(state);
-        if (result.status === 'paused') {
-          state.status = 'paused';
-        } else {
-          this.#runs.delete(taskId);
-        }
-        return result;
-      } catch (err) {
-        this.#runs.delete(taskId);
-        throw err;
-      }
+      return this.#reenter(state);
     }
     if (state.gate.paused) {
       if (state.budgetPausing) {
-        // budget 排空窗口:挂起尚未落定,记待办,由 #drive 在落定瞬间续跑。
+        // budget 排空窗口:挂起尚未落定,记待办,由收口循环在落定瞬间续跑。
         state.pendingResume = true;
       } else {
+        // 外部 pause(loop 阻塞在派发边界):原地唤醒。
         state.gate.resume();
       }
-      return state.done.promise;
+      return this.#currentSettling(state);
     }
-    if (state.params.budget !== undefined && state.params.budget !== null) {
-      // budget 守护的运行:熔断(failReason=budget_paused)从节点记账到
-      // gate.pause 落定存在异步窗口(事件先标 paused,引擎后停边界),
-      // 此间到达的 resume 记待办,而非 RunNotPaused(否则 resume 被
-      // 静默吞掉,任务永远停在 paused)。
+    const budget = state.params.budget;
+    if (budget !== undefined && budget !== null && budget.level === 'hard') {
+      // 熔断窗口:executor 记账已判 hard(节点结算 budget_paused 在途,
+      // gate.pause 尚未落定,台账 level 是精确信号)。此间到达的 resume
+      // 记待办,挂起落定瞬间由收口循环自动续跑;抛 RunNotPaused 会把这次
+      // resume 静默吞掉,任务永远停在 paused。
       state.pendingResume = true;
-      return state.done.promise;
+      return this.#currentSettling(state);
     }
+    // 健康运行中(无任何 pause 信号):resume 是调用方误用,显式报错;
+    // 不置 pendingResume —— 否则后续真熔断时收口循环会自动续跑,操作者的
+    // budget_paused 决策点(续预算或终止)被静默跳过,任务继续烧预算。
     throw new RunNotPaused(taskId, state.gate.state);
   }
 
-  /** loop 驱动:终态(含 budget 挂起)resolve run() 的 promise 并维护状态表。 */
-  async #drive(state: RunState): Promise<void> {
+  /** resume 重入收口循环:登记在飞 promise,供窗口内后续 resume 等待新终态。 */
+  #reenter(state: RunState): Promise<WorkflowRunResult> {
+    const settling = this.#settle(state);
+    state.settling = settling;
+    return settling;
+  }
+
+  /** 当前在飞的收口循环(引擎启动前到达的极端情形退回 run() 的结果通道)。 */
+  #currentSettling(state: RunState): Promise<WorkflowRunResult> {
+    return state.settling ?? state.done.promise;
+  }
+
+  /**
+   * 收口循环:跑 #loop 到终态;每次落回 paused 时消费 pendingResume(排空
+   * 窗口 / 熔断窗口内到达的 resume 在挂起落定瞬间自动续跑)。status 与
+   * #runs 表只在这里维护 —— #drive 与 resume 重入路径共用同一循环,标志
+   * 不悬空、窗口内 resume 拿到的 promise 永远是当前在飞的那次。
+   */
+  async #settle(state: RunState): Promise<WorkflowRunResult> {
     try {
       let result = await this.#loop(state);
-      // budget 排空窗口内收到的 resume:挂起落定瞬间自动续跑(不落 paused 终态)。
       while (result.status === 'paused' && state.pendingResume) {
         state.pendingResume = false;
         state.status = 'running';
@@ -239,9 +266,20 @@ export class WorkflowEngine {
       } else {
         this.#runs.delete(state.params.taskId);
       }
-      state.done.resolve(result);
+      return result;
     } catch (err) {
       this.#runs.delete(state.params.taskId);
+      throw err;
+    }
+  }
+
+  /** loop 驱动:终态(含 budget 挂起)resolve run() 的 promise 并维护状态表。 */
+  async #drive(state: RunState): Promise<void> {
+    const settling = this.#settle(state);
+    state.settling = settling;
+    try {
+      state.done.resolve(await settling);
+    } catch (err) {
       state.done.reject(err);
     }
   }
