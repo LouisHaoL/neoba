@@ -533,3 +533,131 @@ describe('桥健壮性:并发读循环 / 取消 / 收尾(#19)', () => {
     stdio.end();
   });
 });
+
+// ---- #20 回归:auto-session 握手失败不再静默降级为 admin 语义 ----
+
+/** 可编程假 callDaemon:session.init 可按队列逐次失败/成功,其余方法照常记账。 */
+function fakeCallDaemonWithHandshake(handshakeOutcomes: ('fail' | 'ok')[]): {
+  caller: DaemonCaller;
+  calls: { method: string; params: Record<string, unknown> }[];
+} {
+  const calls: { method: string; params: Record<string, unknown> }[] = [];
+  let handshakeIndex = 0;
+  const caller: DaemonCaller = (method, params) => {
+    calls.push({ method, params: params as Record<string, unknown> });
+    if (method === 'session.init') {
+      const outcome = handshakeOutcomes[Math.min(handshakeIndex, handshakeOutcomes.length - 1)];
+      handshakeIndex += 1;
+      if (outcome === 'fail') {
+        return Promise.reject(new DaemonCallError({
+          code: -32000, message: 'daemon 不可达', data: { code: 'DAEMON_TIMEOUT' }, status: 0,
+        }));
+      }
+      return Promise.resolve({ protocol: '1.0' });
+    }
+    return Promise.resolve({ method });
+  };
+  return { caller, calls };
+}
+
+/** 收集 stderr 输出的假诊断通道。 */
+function fakeStderr(): { channel: { write(chunk: string): unknown }; lines: string[] } {
+  const lines: string[] = [];
+  return { channel: { write(chunk: string) { lines.push(chunk); return true; } }, lines };
+}
+
+describe('auto-session 失败显式报错(#20)', () => {
+  it('握手失败后 needsSession 工具 → isError 阻断,stderr 留痕,不透传 admin 语义', async () => {
+    const { caller, calls } = fakeCallDaemonWithHandshake(['fail']);
+    const errSink = fakeStderr();
+    const harness = makeBridge(caller, { stderr: errSink.channel });
+    await harness.call({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'c', version: '0' } },
+    });
+    await harness.bridge.sessionReady();
+    // initialize 阶段已失败并写 stderr(含失败原因摘要)
+    assert.equal(harness.bridge.session(), null);
+    assert.equal(errSink.lines.length, 1);
+    assert.match(errSink.lines[0]!, /auto-session 握手失败/);
+    assert.match(errSink.lines[0]!, /daemon 不可达/);
+
+    // needsSession 工具:阻断执行,自动重试仍失败 → isError
+    const blocked = await harness.call({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'task_create', arguments: { intent: '不该被执行', preset: 'minimal' } },
+    });
+    assert.equal(blocked['result']['isError'], true);
+    assert.match(blocked['result']['content'][0]['text'] as string, /auto-session 握手失败/);
+    // daemon 侧只看到 initialize 一次握手 + 一次重试握手,task.create 从未发出
+    assert.deepEqual(calls.map((c) => c.method), ['session.init', 'session.init']);
+
+    // 阻断帧也写了 stderr(重试失败再次留痕)
+    assert.ok(errSink.lines.length >= 2);
+  });
+
+  it('重试握手成功:首次 needsSession 调用前自动重试一次,随后正常执行并注入身份', async () => {
+    const { caller, calls } = fakeCallDaemonWithHandshake(['fail', 'ok']);
+    const errSink = fakeStderr();
+    const harness = makeBridge(caller, { stderr: errSink.channel });
+    await harness.call({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'c', version: '0' } },
+    });
+    await harness.bridge.sessionReady();
+    assert.equal(harness.bridge.session(), null);
+
+    const created = await harness.call({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'task_create', arguments: { intent: '重试后建成', preset: 'minimal' } },
+    });
+    assert.equal(created['result']['isError'], false);
+    assert.equal(created['result']['structuredContent']['method'], 'task.create');
+    // task.create 携带了重试握手成功后的会话身份
+    const create = calls.find((c) => c.method === 'task.create');
+    assert.ok(create !== undefined);
+    assert.match(create.params['session'] as string, /^mcp-/);
+    assert.equal(create.params['tenant'], 'default');
+    assert.ok(harness.bridge.session() !== null);
+  });
+
+  it('白名单工具(needsSession=false)在 identity=null 时行为不变,照常透传', async () => {
+    const { caller, calls } = fakeCallDaemonWithHandshake(['fail']);
+    const errSink = fakeStderr();
+    const harness = makeBridge(caller, { stderr: errSink.channel, autoSession: false });
+    await harness.call({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'c', version: '0' } },
+    });
+    assert.equal(harness.bridge.session(), null);
+    const caps = await harness.call({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'capabilities_list', arguments: {} },
+    });
+    assert.equal(caps['result']['isError'], false);
+    assert.equal(caps['result']['structuredContent']['method'], 'capabilities.list');
+    // 无重试握手副作用:白名单工具不触发 session.init
+    assert.deepEqual(calls.map((c) => c.method), ['capabilities.list']);
+  });
+
+  it('参数显式给全 tenant+session:身份是明示选择,握手失败也放行(不静默注入)', async () => {
+    const { caller, calls } = fakeCallDaemonWithHandshake(['fail']);
+    const errSink = fakeStderr();
+    const harness = makeBridge(caller, { stderr: errSink.channel, autoSession: false });
+    await harness.call({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'c', version: '0' } },
+    });
+    const created = await harness.call({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: {
+        name: 'task_create',
+        arguments: { intent: '显式身份', preset: 'minimal', tenant: 'acme', session: 's-manual' },
+      },
+    });
+    assert.equal(created['result']['isError'], false);
+    const create = calls.find((c) => c.method === 'task.create');
+    assert.equal(create!.params['tenant'], 'acme');
+    assert.equal(create!.params['session'], 's-manual');
+  });
+});

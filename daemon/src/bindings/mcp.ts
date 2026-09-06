@@ -46,6 +46,8 @@ export interface McpBridgeOptions {
   readonly tenant?: string;
   /** 注入随机源(测试);缺省 crypto.randomBytes。 */
   readonly random?: () => string;
+  /** 诊断输出通道(auto-session 握手失败等写这里);缺省 process.stderr。 */
+  readonly stderr?: { write(chunk: string): unknown };
 }
 
 export interface McpBridge {
@@ -399,6 +401,16 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
     options.serverInfo ?? { name: 'neoba-mcp', version: '0.1.0' };
   const autoSession = options.autoSession ?? true;
   const random = options.random ?? (() => randomBytes(4).toString('hex'));
+  const stderr = options.stderr ?? { write: (chunk: string) => process.stderr.write(chunk) };
+
+  /** 诊断写 stderr:stderr 不可写时静默(诊断通道自身不能炸桥)。 */
+  function writeStderr(line: string): void {
+    try {
+      stderr.write(line);
+    } catch {
+      // 诊断输出失败已无更好的上报通道,吞掉。
+    }
+  }
 
   let initialized = false;
   let negotiatedVersion: string | null = null;
@@ -438,7 +450,9 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
     return { jsonrpc: '2.0', id, error: { code, message, ...(data === undefined ? {} : { data }) } };
   }
 
-  /** 自动握手 + 会话身份缓存;失败不抛(显式 session_init 可重试)。 */
+  /** 自动握手 + 会话身份缓存;失败不抛(显式 session_init / 下次 needsSession
+   * 调用前的自动重试可再试),但失败必须写 stderr 留痕——静默吞掉会让客户端
+   * 在毫无感知的情况下滑向 admin 语义(#20)。 */
   function startAutoSession(): Promise<void> {
     const tenant = options.tenant ?? 'default';
     const session = `mcp-${random()}`;
@@ -453,9 +467,27 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
       .then(() => {
         sessionIdentity = { tenant, session };
       })
-      .catch(() => {
+      .catch((err) => {
         sessionIdentity = null;
+        const reason =
+          err instanceof DaemonCallError ? `${err.message} (code=${err.code})` : String(err);
+        writeStderr(
+          `[neoba-mcp] auto-session 握手失败: ${reason};` +
+            'needsSession 工具已阻断,直至握手成功或显式 session_init(请重启桥或检查 daemon)\n',
+        );
       });
+  }
+
+  /** needsSession 工具调用前的自动重试(每次调用至多一次);并发调用共享
+   * 同一次在飞重试,避免风暴式重复 session.init。 */
+  let sessionRetry: Promise<void> | null = null;
+  function retryAutoSession(): Promise<void> {
+    if (sessionRetry === null) {
+      sessionRetry = startAutoSession().finally(() => {
+        sessionRetry = null;
+      });
+    }
+    return sessionRetry;
   }
 
   /** 给需要会话身份的工具注入 tenant/session 缺省值。 */
@@ -467,12 +499,43 @@ export function createMcpBridge(options: McpBridgeOptions): McpBridge {
     return merged;
   }
 
+  /** needsSession 工具的会话前提校验:身份缺失时先重试一次握手;仍失败且
+   * 参数未显式给全 tenant+session,则拒绝执行(返回 null)——绝不静默透传
+   * admin 语义。参数显式指明身份时放行:身份是客户端明示的选择,由 daemon
+   * 侧授权裁决,不属于静默降级。 */
+  async function requireSession(args: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    const explicitIdentity =
+      typeof args['tenant'] === 'string' && typeof args['session'] === 'string';
+    if (sessionIdentity !== null || explicitIdentity) return injectSession(args);
+    await retryAutoSession();
+    if (sessionIdentity === null) return null;
+    return injectSession(args);
+  }
+
   async function callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const tool = TOOL_BY_NAME.get(name);
     if (tool === undefined) throw new Error(`未知工具: ${name}`);
     if (tool.name === 'session_init') return doExplicitSessionInit(args, signal);
-    const merged = tool.needsSession ? injectSession(args) : args;
-    return toolResult(await options.callDaemon(name.replaceAll('_', '.'), merged, signal));
+    if (tool.needsSession) {
+      const merged = await requireSession(args);
+      if (merged === null) {
+        // #20:身份缺失(重试后仍握手失败)→ 显式报错,阻断 admin 旁路。
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                'auto-session 握手失败且未显式指定 tenant/session,已阻断执行' +
+                '(不再静默降级为 admin 语义)。请重启 neoba-mcp 桥或检查 daemon ' +
+                '连通性;也可先用 session_init 工具显式握手后重试。',
+            },
+          ],
+          isError: true,
+        };
+      }
+      args = merged;
+    }
+    return toolResult(await options.callDaemon(name.replaceAll('_', '.'), args, signal));
   }
 
   async function doExplicitSessionInit(args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
