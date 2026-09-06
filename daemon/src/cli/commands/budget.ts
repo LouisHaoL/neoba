@@ -21,7 +21,7 @@ export const budgetCommand: Command = {
   summary: '任务预算:status / raise(续预算后 task resume)',
   usage: 'neoba budget <task_id> <status|raise --limit N> [--state-dir DIR] [--json]',
   async run(args, { io, deps }) {
-    const { flags, positionals } = parseArgs(args, ['state-dir', 'limit']);
+    const { flags, positionals } = parseArgs(args, ['state-dir', 'limit'], ['state-dir', 'limit', 'json']);
     const asJson = flagBool(flags, 'json');
     const taskId = positionals[0];
     const action = positionals[1];

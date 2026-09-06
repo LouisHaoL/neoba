@@ -25,7 +25,7 @@ export const approvalsCommand: Command = {
   summary: '查看审批台账(缺省 pending;--all 全量)',
   usage: 'neoba approvals [--all] [--state-dir DIR] [--json]',
   async run(args, { io, deps }) {
-    const { flags } = parseArgs(args, ['state-dir']);
+    const { flags } = parseArgs(args, ['state-dir'], ['state-dir', 'all', 'json']);
     const asJson = flagBool(flags, 'json');
     const all = flagBool(flags, 'all');
     const stateDir = flagString(flags, 'state-dir') ?? join(deps.homedir(), '.neoba');

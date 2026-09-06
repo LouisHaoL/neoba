@@ -18,7 +18,7 @@ export const pruneCommand: Command = {
   summary: '工件仓库孤儿对象清理(默认 dry-run,--yes 才删;--plan 打印自动 GC 计划)',
   usage: 'neoba prune [--state-dir DIR] [--plan] [--yes]',
   async run(args, { io, deps }) {
-    const { flags } = parseArgs(args, ['state-dir']);
+    const { flags } = parseArgs(args, ['state-dir'], ['state-dir', 'plan', 'yes']);
     const yes = flagBool(flags, 'yes');
     const planOnly = flagBool(flags, 'plan');
     const stateDir =

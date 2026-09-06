@@ -13,7 +13,7 @@ export const doctorCommand: Command = {
   summary: '环境检测(后端推荐 / Codex 前置 / 数据面路径)',
   usage: 'neoba doctor [--write] [--json]',
   async run(args, { io, deps }) {
-    const { flags } = parseArgs(args, []);
+    const { flags } = parseArgs(args, [], ['write', 'json']);
     const asJson = flagBool(flags, 'json');
     const doWrite = flagBool(flags, 'write');
 

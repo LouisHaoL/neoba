@@ -282,6 +282,73 @@ describe('cli:prune', () => {
   });
 });
 
+describe('cli:未知 flag 与命令级 --help(issue #28)', () => {
+  it('start --registryy x:未知 flag 报用法错误退出码 2,不启动 daemon', async () => {
+    const io = makeIo();
+    const code = await runCli(['start', '--registryy', 'x'], io, await makeDeps({
+      startDaemon: async () => {
+        throw new Error('不应走到 daemon 启动');
+      },
+    }));
+    assert.equal(code, 2);
+    const errText = io.errLines.join('\n');
+    assert.ok(errText.includes('未知选项 --registryy'));
+    assert.ok(errText.includes('--registry')); // 合法选项清单里能对出正确拼写
+    assert.ok(errText.includes('用法: neoba start'));
+  });
+
+  it('start --registryy=x(--flag=value 形态)同样报错', async () => {
+    const io = makeIo();
+    const code = await runCli(['start', '--registryy=x'], io, await makeDeps());
+    assert.equal(code, 2);
+    assert.ok(io.errLines.join('\n').includes('未知选项 --registryy'));
+  });
+
+  it('start --help:退出码 0 打印该命令用法,不启动 daemon', async () => {
+    const io = makeIo();
+    const code = await runCli(['start', '--help'], io, await makeDeps({
+      startDaemon: async () => {
+        throw new Error('不应走到 daemon 启动');
+      },
+    }));
+    assert.equal(code, 0);
+    const text = io.outLines.join('\n');
+    assert.ok(text.includes('用法: neoba start'));
+    assert.ok(text.includes('--state-dir'));
+    assert.ok(text.includes('neoba --help'));
+    assert.deepEqual(io.errLines, []);
+  });
+
+  it('status --help / prune --help:打印用法退出码 0,不执行命令', async () => {
+    const io = makeIo();
+    const code = await runCli(['status', '--help'], io, await makeDeps());
+    assert.equal(code, 0);
+    assert.ok(io.outLines.join('\n').includes('用法: neoba status'));
+
+    const io2 = makeIo();
+    const code2 = await runCli(['prune', '-h'], io2, await makeDeps());
+    assert.equal(code2, 0);
+    assert.ok(io2.outLines.join('\n').includes('用法: neoba prune'));
+  });
+
+  it('合法 flag 调用不受影响:prune --state-dir DIR --plan(值型 + 布尔混合)', async () => {
+    const stateDir = await makeTmp('plan');
+    const io = makeIo();
+    const code = await runCli(['prune', '--state-dir', stateDir, '--plan'], io, await makeDeps());
+    assert.equal(code, 0);
+    assert.ok(io.outLines.join('\n').includes('自动 GC 计划'));
+  });
+
+  it('位置参数不被误判为未知 flag:task <id> status 走到连接阶段才失败', async () => {
+    const stateDir = await makeTmp('task');
+    const io = makeIo();
+    const code = await runCli(['task', 't-1', 'status', '--state-dir', stateDir], io, await makeDeps());
+    assert.equal(code, 1);
+    // 参数层通过(否则退出码会是 2);失败发生在连 daemon 阶段。
+    assert.ok(io.errLines.join('\n').includes('daemon 未运行'));
+  });
+});
+
 describe('cli:start / mcp 用法守卫', () => {
   it('--daemonize 报 not-supported,退出码 2', async () => {
     const io = makeIo();

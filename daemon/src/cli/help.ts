@@ -32,3 +32,18 @@ export function renderHelp(
 export function renderVersion(version: string): string {
   return `neoba ${version}`;
 }
+
+/**
+ * 单命令帮助(issue #28):`neoba <命令> --help` 在命令层拦截后输出。
+ * 取舍:help.ts 没有分命令长文档,这里复用注册表的单行 usage(含该命令
+ * 全部合法 flag,与 parseArgs 白名单同源维护)+ 顶层 help 指引。
+ */
+export function renderCommandHelp(command: Command): string {
+  return [
+    `${command.name} — ${command.summary}`,
+    '',
+    `用法: ${command.usage}`,
+    '',
+    '运行 neoba --help 查看全部命令。',
+  ].join('\n');
+}

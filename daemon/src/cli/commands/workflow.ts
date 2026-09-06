@@ -32,6 +32,10 @@ import {
 } from '../../portability/index.ts';
 import type { ExportLevel, PresetLoadReport } from '../../portability/index.ts';
 
+/** workflow check/export 共用的值型 flag 与合法 flag 白名单(issue #28)。 */
+const WORKFLOW_VALUE_FLAGS = ['presets', 'intent', 'models', 'registry', 'level', 'out'] as const;
+const WORKFLOW_ALLOWED_FLAGS: readonly string[] = [...WORKFLOW_VALUE_FLAGS, 'json'];
+
 export const workflowCommand: Command = {
   name: 'workflow',
   summary: '工作流排查与可移植性(§3.5g):check 查缺 / export 三档导出',
@@ -46,7 +50,7 @@ export const workflowCommand: Command = {
     }
     const rest = args.slice(1);
     const presetDirs = collectValues(rest, 'presets');
-    const { flags, positionals } = parseArgs(rest, ['presets', 'intent', 'models', 'registry', 'level', 'out']);
+    const { flags, positionals } = parseArgs(rest, WORKFLOW_VALUE_FLAGS, WORKFLOW_ALLOWED_FLAGS);
     const file = positionals[0];
     if (file === undefined) throw new CliUsageError('缺少 workflow 文件参数');
     const asJson = flagBool(flags, 'json');
