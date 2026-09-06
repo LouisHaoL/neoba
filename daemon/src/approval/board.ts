@@ -12,7 +12,8 @@
  *
  * 审计事实:申请/定案经注入的 emit 落事件日志(approval.requested / decided),
  * 授予/回收经 GrantExecutor 的 sink 走同一份日志 —— §3.3"审计日志 = 事件
- * 日志,同一份"。内存台账(list)只是查询视图,不是事实源。
+ * 日志,同一份"。内存台账(list)只是查询视图,不是事实源:
+ * 重启后经 restoreFromEvents 从事件日志重放重建(issue #14)。
  */
 import {
   AgentUnknown,
@@ -20,7 +21,8 @@ import {
   GrantDuplicate,
   ScopeNotGrantable,
 } from '../capability/index.ts';
-import type { GrantExecutor, GrantManifest, LoadedRegistry } from '../capability/index.ts';
+import type { GrantExecutor, GrantManifest, LoadedRegistry, Scope } from '../capability/index.ts';
+import type { ApprovalDecidedPayload, ApprovalRequestedPayload, Event } from '../events/index.ts';
 import { BUILTIN_LAYER, evaluateRequest } from './policy.ts';
 import type { PolicyLayer } from './types.ts';
 import type { ApprovalEventInput, ApprovalRecord, DecideResult, SubmitResult, ToolRequestSpec } from './types.ts';
@@ -50,6 +52,14 @@ export class RequestUnknown extends ApprovalError {
     super('REQ_UNKNOWN', `审批单不存在或已定案: ${reqId}`);
     this.reqId = reqId;
   }
+}
+
+/** restoreFromEvents 的重放报告:重建条数 + 无法重建而跳过的残缺事件数。 */
+export interface ApprovalReplayReport {
+  /** 从 requested 事件重建的审批单数(含随后被 decided 事件闭合的)。 */
+  readonly restored: number;
+  /** 无法重建而跳过的事件数(principal 残缺的 requested / 无主 decided)。 */
+  readonly skipped: number;
 }
 
 export interface ApprovalBoardOptions {
@@ -97,6 +107,9 @@ export class ApprovalBoard {
     if (!entry.grantable_scopes.includes(request.scope)) {
       throw new ScopeNotGrantable(request.cap, request.scope, entry.grantable_scopes);
     }
+    // req_id 同步占位(issue #14):在首个 await 前同步写入台账,并发同
+    // reqId 的第二次 submit 在上方校验期即撞 RequestDuplicate,消除
+    // "校验与写入跨 await"的 TOCTOU(曾产生重复审批事件 / auto 路径双授予)。
     if (this.#records.has(request.reqId)) throw new RequestDuplicate(request.reqId);
     if (durationMs(request.duration) === null) {
       throw new ApprovalError('DURATION_INVALID', `duration 非法: ${request.duration}(须匹配 ^\\d+[smhd]$)`);
@@ -117,16 +130,25 @@ export class ApprovalBoard {
       decisionSource: null,
       narrowedTo: null,
     };
-    await this.#emit({
-      type: 'approval.requested',
-      agentId: request.from,
-      payload: {
-        reqId: request.reqId,
-        cap: request.cap,
-        scope: request.scope,
-        reason: request.reason,
-      },
-    });
+    this.#records.set(request.reqId, base);
+    try {
+      // duration 随事件落盘(issue #14):重放重建台账需要它推授权到期时刻。
+      await this.#emit({
+        type: 'approval.requested',
+        agentId: request.from,
+        payload: {
+          reqId: request.reqId,
+          cap: request.cap,
+          scope: request.scope,
+          reason: request.reason,
+          duration: request.duration,
+        },
+      });
+    } catch (err) {
+      // 事件落盘失败:回滚同步占位,单子视为未提交(可重新提交同 reqId)。
+      this.#records.delete(request.reqId);
+      throw err;
+    }
 
     const { outcome, ruleId } = evaluateRequest(
       withBuiltin(this.#layers(request.from)),
@@ -136,6 +158,10 @@ export class ApprovalBoard {
     );
     if (outcome === 'auto') {
       const decisionSource = `auto_rule:${ruleId ?? 'unknown'}`;
+      // 与人工定案同序(issue #14):先授予成功,再置 granted 状态并落 decided
+      // 事件 —— 授予失败时台账保持 pending(重启重放后同样回到 pending),
+      // 不会出现"事件已批、实际未授权且不可重试"的断态。
+      const manifest = await this.#grant(request, decisionSource);
       const record: ApprovalRecord = {
         ...base,
         status: 'granted',
@@ -149,14 +175,18 @@ export class ApprovalBoard {
         agentId: request.from,
         payload: { reqId: request.reqId, decision: 'granted', decisionSource },
       });
-      const manifest = await this.#grant(request, decisionSource);
       return { status: 'auto_granted', record, manifest };
     }
     this.#records.set(request.reqId, base);
     return { status: 'pending', record: base };
   }
 
-  /** 人工定案(人机入口/主控):granted 可带 narrowedTo 窄化授权。 */
+  /**
+   * 人工定案(人机入口/主控):granted 可带 narrowedTo 窄化授权。
+   * issue #14:先授予成功,再置状态并落 decided 事件 —— 授予侧校验失败
+   * (AgentIdInvalid / AgentUnknown 等)时单子保持 pending,可重试定案,
+   * 不会出现"已批未授权且不可重试"的断态;denied 无授予,直接定案。
+   */
   async decide(
     reqId: string,
     decision: 'granted' | 'denied',
@@ -167,9 +197,38 @@ export class ApprovalBoard {
     if (record === undefined || record.status !== 'pending') throw new RequestUnknown(reqId);
     const decisionSource = `manual:${by}`;
     const now = this.#now().toISOString();
+    if (decision === 'denied') {
+      const decided: ApprovalRecord = {
+        ...record,
+        status: 'denied',
+        decidedAt: now,
+        decidedBy: by,
+        decisionSource,
+      };
+      this.#records.set(reqId, decided);
+      await this.#emit({
+        type: 'approval.decided',
+        agentId: decided.agentId,
+        payload: { reqId, decision, decisionSource },
+      });
+      return { status: 'denied', record: decided };
+    }
+    // 先授予(失败原样抛出,record 未动,仍是 pending 可重试)。
+    const manifest = await this.#grant(
+      {
+        from: record.agentId,
+        reqId: record.reqId,
+        cap: record.cap,
+        reason: record.reason,
+        scope: record.scope,
+        duration: record.duration,
+      },
+      decisionSource,
+      options.narrowedTo,
+    );
     const decided: ApprovalRecord = {
       ...record,
-      status: decision === 'granted' ? 'granted' : 'denied',
+      status: 'granted',
       decidedAt: now,
       decidedBy: by,
       decisionSource,
@@ -186,22 +245,76 @@ export class ApprovalBoard {
         ...(options.narrowedTo !== undefined ? { narrowedTo: options.narrowedTo } : {}),
       },
     });
-    if (decision === 'denied') {
-      return { status: 'denied', record: decided };
-    }
-    const manifest = await this.#grant(
-      {
-        from: decided.agentId,
-        reqId: decided.reqId,
-        cap: decided.cap,
-        reason: decided.reason,
-        scope: decided.scope,
-        duration: decided.duration,
-      },
-      decisionSource,
-      options.narrowedTo,
-    );
     return { status: 'granted', record: decided, manifest };
+  }
+
+  /**
+   * 启动重放(issue #14):从事件日志的 approval.requested / approval.decided
+   * 重建内存台账,重启后 pending 单仍可 decide(任务不再永久卡
+   * waiting_approval)。事件日志是审计事实源,台账只是重建的查询视图。
+   *
+   * 向前兼容:旧事件 payload 缺 duration 时按保守缺省 "1h" 重建(保证旧
+   * pending 单可定案;真实到期由 grant.granted 的 ttl 语义另行守护)。
+   * principal.agent 残缺的 requested 与无主 decided 无法重建,保守跳过并计数。
+   */
+  restoreFromEvents(events: readonly Event[]): ApprovalReplayReport {
+    let restored = 0;
+    let skipped = 0;
+    for (const ev of events) {
+      if (ev.type === 'approval.requested') {
+        const p = ev.payload as ApprovalRequestedPayload;
+        const agent = ev.principal.agent;
+        // principal.agent 残缺(旧事件 / 手写日志)无法归属申请人 → 跳过。
+        if (agent === null || p.reqId === '') {
+          skipped += 1;
+          continue;
+        }
+        // 与 makeApprovalEmit 的 principalFromAgentId 对偶:principal 拆存
+        // task 段与实例段,这里重组完整 agentId('<task>/<实例>')。
+        const agentId = ev.principal.task !== null ? `${ev.principal.task}/${agent}` : agent;
+        const duration = typeof p.duration === 'string' && durationMs(p.duration) !== null
+          ? p.duration
+          : '1h';
+        this.#records.set(p.reqId, {
+          reqId: p.reqId,
+          agentId,
+          cap: p.cap,
+          scope: p.scope as Scope,
+          reason: p.reason,
+          duration,
+          status: 'pending',
+          submittedAt: ev.ts,
+          decidedAt: null,
+          decidedBy: null,
+          decisionSource: null,
+          narrowedTo: null,
+        });
+        restored += 1;
+      } else if (ev.type === 'approval.decided') {
+        const p = ev.payload as ApprovalDecidedPayload;
+        const record = this.#records.get(p.reqId);
+        // 无主 decided(requested 已丢 / 日志裁剪)→ 跳过。
+        if (record === undefined) {
+          skipped += 1;
+          continue;
+        }
+        this.#records.set(p.reqId, {
+          ...record,
+          status: p.decision === 'granted' ? 'granted' : 'denied',
+          decidedAt: ev.ts,
+          // decision_source 反推定案人:auto_rule:* 为 daemon 自动放行,
+          // manual:{by} 剥前缀;缺省 decisionSource 时保守记 unknown。
+          decidedBy: p.decisionSource.startsWith('auto_rule:')
+            ? 'daemon'
+            : p.decisionSource.startsWith('manual:')
+              ? p.decisionSource.slice('manual:'.length) || 'unknown'
+              : 'unknown',
+          decisionSource: p.decisionSource,
+          ...(p.narrowedTo !== undefined ? { narrowedTo: p.narrowedTo } : {}),
+        });
+      }
+    }
+    return { restored, skipped };
   }
 
   /** TTL 守护:回收全部到期的 escalation 授予;返回回收条数。 */

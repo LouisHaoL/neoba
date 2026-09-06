@@ -15,6 +15,7 @@ import {
   presetPolicyLayer,
 } from '../../src/approval/index.ts';
 import type { ApprovalEventInput, PolicyLayer, ToolRequestSpec } from '../../src/approval/index.ts';
+import type { Event } from '../../src/events/index.ts';
 import {
   CapUnknown,
   GrantExecutor,
@@ -277,5 +278,182 @@ describe('approval/board 层栈兜底', () => {
     const layer = presetPolicyLayer('coder', preset);
     assert.equal(layer.id, 'preset:coder');
     assert.deepEqual(layer.policy.auto_approve, ['fs:workdir']);
+  });
+});
+
+// ---------------------------------------------------------------- issue #14
+
+/** 台账事件(测试注入)→ 落盘 Event 形状(带 seq / ts / principal)。
+ *  principal 拆存与 makeApprovalEmit 一致:agent = 实例名,task = 任务 id。 */
+function asEvents(inputs: readonly ApprovalEventInput[], agentId: string): Event[] {
+  const idx = agentId.indexOf('/');
+  return inputs.map((e, i) => ({
+    v: '1.0',
+    seq: i + 1,
+    ts: new Date(Date.parse('2026-09-05T00:00:00Z') + i * 1_000).toISOString(),
+    type: e.type,
+    principal: {
+      tenant: 'default',
+      session: 'main',
+      task: idx > 0 ? agentId.slice(0, idx) : null,
+      agent: idx > 0 ? agentId.slice(idx + 1) : agentId,
+    },
+    payload: e.payload as never,
+  }));
+}
+
+describe('approval/board 事件重放重建(#14)', () => {
+  it('pending 单 → 新 board 重放事件 → decide 成功(重启后不再 RequestUnknown)', async () => {
+    const first = board({ now: () => new Date('2026-09-05T00:00:00Z') });
+    await first.board.submit(request({ reqId: 'req-20' }));
+    const logged = asEvents(first.events, 'task-42/e2e-tester-01');
+
+    const second = board({ now: () => new Date('2026-09-05T00:00:00Z') });
+    const report = second.board.restoreFromEvents(logged);
+    assert.deepEqual(report, { restored: 1, skipped: 0 });
+    assert.deepEqual(second.board.listPending().map((r) => r.reqId), ['req-20']);
+
+    const result = await second.board.decide('req-20', 'granted', 'orchestrator:main');
+    assert.equal(result.status, 'granted');
+    const grant = second.grants.grantsOf('task-42/e2e-tester-01')[0];
+    assert.equal(grant?.source, 'escalation:req-20');
+    assert.equal(grant?.ttl, '2026-09-05T02:00:00.000Z'); // duration 随事件重放,2h
+    assert.equal(second.board.listPending().length, 0);
+  });
+
+  it('旧事件缺 duration 向前兼容重建;decided 闭合状态;无主 decided 计 skipped', () => {
+    const { board: b } = board();
+    const report = b.restoreFromEvents([
+      {
+        v: '1.0',
+        seq: 1,
+        ts: '2026-09-05T00:00:00.000Z',
+        type: 'approval.requested',
+        principal: { tenant: 'default', session: 'main', task: 'task-42', agent: 'e2e-tester-01' },
+        // 旧版 payload 无 duration → 保守缺省 1h 重建,旧 pending 单仍可定案。
+        payload: { reqId: 'req-old', cap: 'mcp:playwright', scope: 'write', reason: '旧格式' },
+      },
+      {
+        v: '1.0',
+        seq: 2,
+        ts: '2026-09-05T00:01:00.000Z',
+        type: 'approval.decided',
+        principal: { tenant: 'default', session: 'main', task: 'task-42', agent: 'e2e-tester-01' },
+        payload: { reqId: 'req-old', decision: 'granted', decisionSource: 'manual:boss' },
+      },
+      {
+        v: '1.0',
+        seq: 3,
+        ts: '2026-09-05T00:02:00.000Z',
+        type: 'approval.decided',
+        principal: { tenant: 'default', session: 'main', task: 'task-42', agent: 'e2e-tester-01' },
+        payload: { reqId: 'req-orphan', decision: 'denied', decisionSource: 'manual:boss' },
+      },
+    ]);
+    assert.deepEqual(report, { restored: 1, skipped: 1 });
+    const record = b.listAll().find((r) => r.reqId === 'req-old');
+    assert.equal(record?.status, 'granted');
+    assert.equal(record?.agentId, 'task-42/e2e-tester-01'); // principal 重组完整 agentId
+    assert.equal(record?.duration, '1h');
+    assert.equal(record?.decidedBy, 'boss');
+    assert.equal(record?.decisionSource, 'manual:boss');
+    assert.equal(record?.submittedAt, '2026-09-05T00:00:00.000Z');
+    assert.equal(record?.decidedAt, '2026-09-05T00:01:00.000Z');
+    assert.equal(b.listPending().length, 0);
+  });
+
+  it('auto 放行的 decided 重放后 decision_source / decidedBy 还原', async () => {
+    const preset = parsePreset(
+      minimalPresetDoc({
+        name: 'e2e-tester',
+        escalation_policy: { auto_approve: ['mcp:playwright'], require_approval: ['*'] },
+      }),
+    );
+    const first = board({
+      layers: () => [presetPolicyLayer('e2e-tester', preset)],
+      now: () => new Date('2026-09-05T00:00:00Z'),
+    });
+    await first.board.submit(request({ reqId: 'req-21' }));
+    const second = board({ layers: () => [presetPolicyLayer('e2e-tester', preset)] });
+    second.board.restoreFromEvents(asEvents(first.events, 'task-42/e2e-tester-01'));
+    const record = second.board.listAll().find((r) => r.reqId === 'req-21');
+    assert.equal(record?.status, 'granted');
+    assert.equal(record?.decisionSource, 'auto_rule:preset:e2e-tester');
+    assert.equal(record?.decidedBy, 'daemon');
+  });
+});
+
+describe('approval/board reqId 并发去重(#14)', () => {
+  it('并发同 reqId 双提交:只一份成功,只落一份 requested 事件', async () => {
+    const { board: b, events } = board();
+    const results = await Promise.allSettled([
+      b.submit(request({ reqId: 'req-30' })),
+      b.submit(request({ reqId: 'req-30' })),
+    ]);
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+    assert.equal(fulfilled.length, 1);
+    assert.equal(rejected.length, 1);
+    const dup = rejected[0];
+    assert.ok(dup !== undefined && dup.status === 'rejected' && dup.reason instanceof RequestDuplicate);
+    assert.equal(events.filter((e) => e.type === 'approval.requested').length, 1);
+    assert.equal(b.listPending().length, 1);
+  });
+
+  it('事件落盘失败:占位回滚,同 reqId 可重新提交', async () => {
+    let emitBroken = true;
+    const grants = new GrantExecutor(registry());
+    const b = new ApprovalBoard({
+      registry: registry(),
+      grants,
+      emit: (ev) => {
+        if (emitBroken) throw new Error('log io boom');
+        void ev;
+      },
+      layers: () => [],
+    });
+    await assert.rejects(b.submit(request({ reqId: 'req-31' })), /log io boom/);
+    assert.equal(b.listPending().length, 0);
+    emitBroken = false;
+    const result = await b.submit(request({ reqId: 'req-31' }));
+    assert.equal(result.status, 'pending');
+  });
+});
+
+describe('approval/board decide 先授予后定案(#14)', () => {
+  it('授予失败:单子保持 pending 可重试,不落 decided 事件', async () => {
+    const realGrants = new GrantExecutor(registry());
+    let failGrant = true;
+    const flaky = {
+      grant: (agentId: string, spec: Parameters<GrantExecutor['grant']>[1]) => {
+        if (failGrant) return Promise.reject(new Error('AGENT_ID_INVALID: 模拟授予失败'));
+        return realGrants.grant(agentId, spec);
+      },
+      revoke: realGrants.revoke.bind(realGrants),
+      manifest: realGrants.manifest.bind(realGrants),
+      allGrants: realGrants.allGrants.bind(realGrants),
+      grantsOf: realGrants.grantsOf.bind(realGrants),
+    } as unknown as GrantExecutor;
+    const events: ApprovalEventInput[] = [];
+    const b = new ApprovalBoard({
+      registry: registry(),
+      grants: flaky,
+      emit: (ev) => {
+        events.push(ev);
+      },
+      layers: () => [],
+    });
+    await b.submit(request({ reqId: 'req-32' }));
+    // 第一次定案:授予侧失败 → 抛错,状态未动,可重试。
+    await assert.rejects(b.decide('req-32', 'granted', 'orchestrator:main'), /AGENT_ID_INVALID/);
+    assert.deepEqual(b.listPending().map((r) => r.reqId), ['req-32']);
+    assert.ok(!events.some((e) => e.type === 'approval.decided'));
+    // 重试:授予成功 → 正常定案落事件。
+    failGrant = false;
+    const result = await b.decide('req-32', 'granted', 'orchestrator:main');
+    assert.equal(result.status, 'granted');
+    assert.equal(realGrants.grantsOf('task-42/e2e-tester-01')[0]?.source, 'escalation:req-32');
+    assert.ok(events.some((e) => e.type === 'approval.decided'));
+    assert.equal(b.listPending().length, 0);
   });
 });

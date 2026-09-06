@@ -272,6 +272,11 @@ export interface ApprovalRequestedPayload extends EventPayloadBase {
   readonly cap: string;
   readonly scope: string;
   readonly reason: string;
+  /**
+   * 授权时长(^\\d+[smhd]$;issue #14 起随事件落盘,重启重放重建审批台账
+   * 需要它推授权到期时刻)。旧事件缺省该字段,重放方按保守缺省处理。
+   */
+  readonly duration?: string | null;
 }
 
 export interface ApprovalDecidedPayload extends EventPayloadBase {
