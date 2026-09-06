@@ -3,6 +3,10 @@
  *
  *   check  显式本地入口:输出缺失清单(缺哪个 preset / cap / 模型准入
  *          不通过),移植前后各跑一次;实现底座 = plancheck(§3.5c)。
+ *          模型准入口径与 daemon 一致(issue #5):workflow 声明了
+ *          model.tier 的节点而未给 --models 注册表时,check 报
+ *          models_registry_missing 且退出非 0 —— 不允许「本地过检、
+ *          daemon workflow.run 恒校验(空表即拒)时被拒」的假阳性。
  *   export 三档导出(minimal|brief|full)+ README;铁律:任何档位不含
  *          凭据 —— 擦除逻辑在 portability 模块(§3.8)。
  *
@@ -14,7 +18,8 @@ import type { CliIo, Command } from '../types.ts';
 import { defaultRegistry, loadCapabilityRegistryFile } from '../../capability/index.ts';
 import type { LoadedRegistry } from '../../capability/types.ts';
 import { checkIntent, checkWorkflow } from '../../plancheck/index.ts';
-import type { IntentDoc } from '../../plancheck/types.ts';
+import type { IntentDoc, Issue, WorkflowDoc } from '../../plancheck/types.ts';
+import type { Preset } from '../../capability/types.ts';
 import {
   EXPORT_LEVELS,
   buildExportBundle,
@@ -30,6 +35,7 @@ export const workflowCommand: Command = {
   summary: '工作流排查与可移植性(§3.5g):check 查缺 / export 三档导出',
   usage:
     'neoba workflow check <workflow.json> [--presets DIR]... [--intent FILE] [--models FILE] [--registry FILE] [--json]\n' +
+    '  (预设声明 model.tier 时 check 必须给 --models,否则报 models_registry_missing)\n' +
     '  neoba workflow export <workflow.json> --level minimal|brief|full [--out DIR] [--presets DIR]... [--intent FILE] [--models FILE] [--registry FILE] [--json]',
   async run(args, { io, deps }) {
     const sub = args[0];
@@ -58,7 +64,7 @@ export const workflowCommand: Command = {
     });
 
     if (sub === 'check') {
-      return runCheckOutput(io, file, asJson, check, intent, loaded);
+      return runCheckOutput(io, file, asJson, check, intent, loaded, models !== undefined);
     }
     return runExport(io, file, asJson, flags, check, intent, loaded, registry);
   },
@@ -76,13 +82,18 @@ function runCheckOutput(
   check: CheckedWorkflow,
   intent: IntentDoc | undefined,
   loaded: PresetLoadReport,
+  modelsProvided: boolean,
 ): number {
-  const ok = check.ok && loaded.errors.length === 0;
+  // 口径对齐(issue #5):未给 --models 时,声明了 model.tier 的节点无法
+  // 做模型准入,与 daemon workflow.run 恒校验的口径不一致 → 报 fail。
+  const gate = modelsProvided ? [] : modelsRegistryMissingIssues(check.doc, loaded.presets);
+  const issues = [...check.issues, ...gate];
+  const ok = check.ok && gate.length === 0 && loaded.errors.length === 0;
   if (asJson) {
     io.out(JSON.stringify({
       ok,
       workflow: file,
-      issues: check.issues,
+      issues,
       preset_errors: loaded.errors,
     }, null, 2));
   } else {
@@ -91,16 +102,42 @@ function runCheckOutput(
     for (const err of loaded.errors) {
       io.out(`⚠ 预设加载失败 ${err.path}: ${err.message}`);
     }
-    for (const iss of check.issues) {
+    for (const iss of issues) {
       io.out(`✗ [${iss.code}] ${iss.field}: ${iss.message}`);
     }
     if (ok) {
       io.out(`检查通过,无缺失(§3.5g)。${intent !== undefined ? '(已联动 intent 验收可追溯)' : '(未提供 --intent,验收可追溯检查跳过)'}`);
     } else {
-      io.out(`共 ${check.issues.length + loaded.errors.length} 处缺失/问题;修复后重跑(移植前后各核验一次)。`);
+      io.out(`共 ${issues.length + loaded.errors.length} 处缺失/问题;修复后重跑(移植前后各核验一次)。`);
     }
   }
   return ok ? 0 : 1;
+}
+
+/**
+ * 未提供 models 注册表时的准入口径检查(issue #5):任一节点引用的预设
+ * 声明了 model.tier → 报 models_registry_missing。workflow 无 model 声明
+ * 则维持原状(不传 --models 也过检)。
+ */
+function modelsRegistryMissingIssues(
+  doc: WorkflowDoc | null,
+  presets: Readonly<Record<string, Preset>>,
+): Issue[] {
+  if (doc === null) return [];
+  const declared: string[] = [];
+  for (const node of doc.nodes) {
+    const tier = presets[node.preset]?.model?.tier;
+    if (tier === undefined) continue;
+    declared.push(`${node.id}(tier=${tier})`);
+  }
+  if (declared.length === 0) return [];
+  return [{
+    code: 'models_registry_missing',
+    field: 'nodes',
+    message:
+      `声明了 model.tier 的节点需要 --models 模型注册表(${declared.join(', ')});` +
+      'daemon 侧 workflow.run 恒校验模型准入,不传则本地过检、运行仍会被拒',
+  }];
 }
 
 // ---------------------------------------------------------------- export
