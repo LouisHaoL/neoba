@@ -61,6 +61,12 @@ export interface ApprovalRecord {
   readonly decisionSource: string | null;
   /** 授权可窄于申请(申请 fs:rw 只授 workdir 子目录)。 */
   readonly narrowedTo: string | null;
+  /**
+   * issue #15:定案/自动放行时申请的 cap+scope 已被持有(GrantDuplicate
+   * 幂等吞掉,未新建授予、无新 TTL)→ 标注 already_held,审计可见,
+   * 「授权到期即回收」不静默失效。增量字段,缺省 = 未标注(向前兼容)。
+   */
+  readonly alreadyHeld?: boolean;
 }
 
 /** submit 的三态结果。 */
@@ -92,6 +98,8 @@ export interface ApprovalEventInput {
         readonly decision: 'granted' | 'denied';
         readonly decisionSource: string;
         readonly narrowedTo?: string;
+        /** issue #15:cap+scope 已被持有(幂等未新建授予)时标注;缺省 = 未标注。 */
+        readonly already_held?: boolean;
       };
 }
 

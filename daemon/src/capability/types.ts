@@ -142,9 +142,15 @@ export interface MountIntent {
   readonly tools: readonly string[] | null;
 }
 
-/** 经注入 sink 发出的审计事件 = 审计条目 + agent 归属。 */
+/**
+ * 经注入 sink 发出的审计事件 = 审计条目 + agent 归属 + 授予 scope。
+ * scope 不进 manifest 的 audit 条目(schema 冻结),仅供 sink 侧落
+ * grant.granted / grant.revoked 事件用(issue #15:revoked 事件带 scope
+ * 才能按 (cap, scope) 精确重放)。
+ */
 export interface GrantAuditEvent extends AuditEntry {
   readonly agentId: string;
+  readonly scope?: Scope;
 }
 
 /** 最小事件 sink 接口(附录:src/events 模块由另一 Agent 并行实现,
