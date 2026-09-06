@@ -19,6 +19,7 @@ import type { WorkflowDoc, WorkflowNodeSpec } from '../../src/plancheck/index.ts
 import { MemoryProvider } from '../../src/provision/index.ts';
 import { NodeExecutor } from '../../src/engine/index.ts';
 import { RunDuplicate } from '../../src/engine/index.ts';
+import { RunNotPaused } from '../../src/engine/index.ts';
 import { WorkflowEngine } from '../../src/engine/index.ts';
 import type { NodeRunContext, NodeRuntime, RuntimeResult } from '../../src/engine/index.ts';
 
@@ -351,6 +352,163 @@ describe('engine/WorkflowEngine', () => {
     const second = await engine.resume('task-budget');
     assert.equal(second.status, 'completed');
     assert.ok(budgetEvents.some((e) => (e as { type: string }).type === 'budget.exceeded'));
+  });
+
+  it('熔断落定窗口并发 resume:重入期间再次熔断,排空窗口内到达的 resume 不丢、拿到新终态(#23 窗口 b)', async () => {
+    const ledger = new BudgetLedger({ limitTokens: 100 }, { emit: () => {} });
+    let releaseDrain: (() => void) | null = null;
+    const trip = (nodeId: string) => ({
+      exitCode: 0,
+      events: [usageEvent(150, 0)],
+      artifacts: [{ name: 'code', payload: nodeId }],
+    });
+    const runtime = router({
+      // p1:三次派发分别对应 首跑熔断 / 重入再熔断(raise 前)/ raise 后完成
+      p1: (ctx) => trip(ctx.nodeId),
+      // p2:首跑即熔断;重入派发后挂住拉长 budget 排空窗口,由测试放行
+      p2: (_ctx, call) => {
+        if (call === 1) return trip('p2');
+        return new Promise<RuntimeResult>((resolve) => {
+          releaseDrain = () => {
+            ledger.raise(100000); // 操作者在挂起窗口内续预算
+            resolve({ exitCode: 0, events: [], artifacts: [{ name: 'code', payload: 'p2' }] });
+          };
+        });
+      },
+      d: (ctx) => ok(ctx),
+    });
+    const { engine, events } = await setup({ coder: preset('coder') }, runtime);
+    const nodes: readonly WorkflowNodeSpec[] = [
+      { id: 'p1', preset: 'coder', parallel: true },
+      { id: 'p2', preset: 'coder', parallel: true },
+      { id: 'd', preset: 'coder', inputs: [{ from: 'p1' }, { from: 'p2' }] },
+    ];
+    const first = await engine.run({
+      tenant: 't1',
+      session: null,
+      taskId: 'task-race-resume',
+      workflow: workflow(nodes),
+      budget: ledger,
+      maxParallel: 2,
+    });
+    assert.equal(first.status, 'paused'); // 首跑:p1/p2 双熔断挂起
+    assert.equal(first.failReason, 'budget_paused');
+
+    // resume#1 重入 loop:p1 立即再次熔断(台账仍 hard),p2 挂住 → 排空窗口
+    const resume1 = engine.resume('task-race-resume');
+    await waitFor(
+      () => eventsOf(events, 'node.failed', 'p1').length === 2 && releaseDrain !== null,
+      '重入后的排空窗口(p1 二次熔断、p2 在飞挂住)',
+    );
+    // resume#2 落在重入路径的 budget 排空窗口内(budgetPausing=true):
+    // 修复前返回已 settle 的 run() 旧 promise 且 pendingResume 悬空,需二次 resume
+    const resume2 = engine.resume('task-race-resume');
+    releaseDrain!();
+
+    const r1 = await resume1;
+    const r2 = await resume2;
+    assert.equal(r1.status, 'completed'); // 窗口内的 resume 被收口循环消费 → 续跑到完成
+    assert.equal(r2.status, 'completed'); // 且拿到的是新终态,不是旧 paused 结果
+    assert.equal(eventsOf(events, 'node.completed', 'd').length, 1);
+    assert.equal(engine.activeTaskIds().includes('task-race-resume'), false);
+  });
+
+  it('运行中 resume:健康运行(台账未 hard)抛 RunNotPaused,之后真熔断仍停在 paused 不自动续跑(#23)', async () => {
+    const ledger = new BudgetLedger({ limitTokens: 100 }, { emit: () => {} });
+    let releaseN2: (() => void) | null = null;
+    const runtime = router({
+      n1: (ctx) => ok(ctx, 'code'),
+      // n2 首派发挂住由测试放行(触发熔断);raise 后的重派发直接完成
+      n2: (_ctx, call) =>
+        call === 1
+          ? new Promise<RuntimeResult>((resolve) => {
+              releaseN2 = () =>
+                resolve({
+                  exitCode: 0,
+                  events: [usageEvent(150, 0)],
+                  artifacts: [{ name: 'code', payload: '2' }],
+                });
+            })
+          : { exitCode: 0, events: [usageEvent(150, 0)], artifacts: [{ name: 'code', payload: '2' }] },
+    });
+    const { engine, events } = await setup({ coder: preset('coder') }, runtime);
+    const runP = engine.run({
+      tenant: 't1',
+      session: null,
+      taskId: 'task-run-resume',
+      workflow: workflow([{ id: 'n1', preset: 'coder' }, { id: 'n2', preset: 'coder', inputs: [{ from: 'n1' }] }]),
+      budget: ledger,
+    });
+    // n1 完成、n2 在飞:健康运行(无任何 pause 信号,台账 ok)
+    await waitFor(() => eventsOf(events, 'node.completed', 'n1').length === 1, 'n1 完成');
+    await assert.rejects(() => engine.resume('task-run-resume'), RunNotPaused);
+
+    // n2 usage 超 hard → 熔断挂起;此前的 resume 不得武装自动续跑
+    releaseN2!();
+    const paused = await runP;
+    assert.equal(paused.status, 'paused');
+    assert.equal(paused.failReason, 'budget_paused');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(eventsOf(events, 'node.started', 'n2').length, 1); // 无自动续跑的重派发
+    assert.ok(engine.activeTaskIds().includes('task-run-resume')); // 仍挂起
+
+    // 语义未破坏:raise 后显式 resume 正常续跑
+    ledger.raise(1000);
+    const second = await engine.resume('task-run-resume');
+    assert.equal(second.status, 'completed');
+  });
+
+  it('熔断窗口 resume:节点已记账 hard、gate.pause 未落定之间到达的 resume 仍能续跑(#23 原有意图保持)', async () => {
+    let releaseExceeded: (() => void) | null = null;
+    const ledger = new BudgetLedger({ limitTokens: 100 }, {
+      emit: (e) => {
+        if ((e as { type: string }).type === 'budget.exceeded') {
+          // budget.exceeded 事件挂起 = executor 已记账 hard(台账 level 可查)
+          // 但节点未结算、gate.pause 未落定的熔断窗口
+          return new Promise<void>((resolve) => {
+            releaseExceeded = () => {
+              ledger.raise(100000); // 操作者在窗口内续预算
+              resolve();
+            };
+          });
+        }
+        return Promise.resolve();
+      },
+    });
+    const runtime = router({
+      n1: () => ({ exitCode: 0, events: [usageEvent(150, 0)], artifacts: [{ name: 'code', payload: '1' }] }),
+      n2: (ctx) => ok(ctx),
+    });
+    const { engine, events } = await setup({ coder: preset('coder') }, runtime);
+    const runP = engine.run({
+      tenant: 't1',
+      session: null,
+      taskId: 'task-window-resume',
+      workflow: workflow([
+        { id: 'n1', preset: 'coder' },
+        { id: 'n2', preset: 'coder', inputs: [{ from: 'n1' }] },
+      ]),
+      budget: ledger,
+    });
+    void runP;
+    // 窗口:usage 已落账、台账已 hard,节点结算仍在途
+    await waitFor(
+      () =>
+        eventsOf(events, 'usage', 'n1').length === 1 &&
+        ledger.level === 'hard' &&
+        releaseExceeded !== null,
+      '熔断窗口(usage 落账 ∧ 台账 hard)',
+    );
+    const resumed = engine.resume('task-window-resume');
+    releaseExceeded!();
+    // 窗口内的 resume 被记待办,挂起落定瞬间由收口循环自动续跑至完成
+    const result = await resumed;
+    assert.equal(result.status, 'completed');
+    assert.deepEqual(
+      eventsOf(events, 'node.started', 'n1').map((e) => (e.payload as { attempt: number }).attempt),
+      [1, 2], // n1 熔断后重派发一次(raise 后记账通过)
+    );
+    assert.equal(eventsOf(events, 'node.completed', 'n2').length, 1);
   });
 
   it('§3.6 运行事件落账:tool_inventory / usage 随节点入事件日志(无 budget 也落)', async () => {
