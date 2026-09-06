@@ -20,7 +20,7 @@ docs/       设计文档
 
 | 决策 | 结论 | 日期 |
 |---|---|---|
-| daemon 技术栈 | Node.js ≥22.6 + TypeScript(可剥离语法,直接跑 .ts 零构建) + ESM + node:test,运行时零第三方依赖(ajv 仅 devDep 用于 schema 校验) | 2026-09-04 |
+| daemon 技术栈 | Node.js ≥22.18 + TypeScript(可剥离语法,直接跑 .ts 零构建) + ESM + node:test,运行时零第三方依赖(ajv 仅 devDep 用于 schema 校验) | 2026-09-04 |
 | 设计文档 | v0.3 为准(并行编排、双 token、观测线、GC、keyring、microsandbox 全部增量入档) | 2026-09-05 |
 
 ## 实现进度

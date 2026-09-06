@@ -20,6 +20,7 @@
 
 import { pathToFileURL } from 'node:url';
 
+import { typeStripGuard } from '../runtime-version.ts';
 import { CliUsageError } from './args.ts';
 import { defaultDeps } from './deps.ts';
 import { renderHelp, renderVersion } from './help.ts';
@@ -81,6 +82,14 @@ async function main(): Promise<void> {
   const invoked = process.argv[1];
   if (invoked === undefined) return;
   if (import.meta.url !== pathToFileURL(invoked).href) return;
+  // 版本防御(issue #18):Node 22.6–22.17 默认不直跑 .ts,bin shim 直接
+  // 指向本文件,低版本区间会在加载阶段以 ERR_UNKNOWN_FILE_EXTENSION 失败;
+  // 在此给出明确报错指引而非让 Node 抛出难懂的扩展名错误。
+  const versionError = typeStripGuard(process.version, process.execArgv);
+  if (versionError !== null) {
+    processIo.err(versionError);
+    process.exit(1);
+  }
   const deps = await defaultDeps();
   process.exitCode = await runCli(process.argv.slice(2), processIo, deps);
 }
