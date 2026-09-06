@@ -197,6 +197,9 @@ export interface ArtifactGcPayload extends EventPayloadBase {
   readonly removedObjects: number;
   /** 本轮判定到期的 manifest id('{tenant}/{task}/{node}/{name}')。 */
   readonly expiredManifests?: readonly string[];
+  /** 删除前二次复核救回的孤儿对象数(复核时已有新指针可达,issue #13)。
+   * 旧事件缺省该字段,消费方按 0 处理。 */
+  readonly rescuedObjects?: number;
 }
 
 // ---------------------------------------------------------------- 编排(§3.5)

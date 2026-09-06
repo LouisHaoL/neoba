@@ -23,8 +23,11 @@
  *
  * 状态与恢复:CAS 天然可恢复 —— manifest 指针即状态,每次读都走磁盘,
  * 重启(open)后无需回放;reconcile() 提供全量对账,prune() 提供手动 GC
- * (删除无 manifest 引用的孤儿对象);M5 自动 GC 见 gc.ts(plan/collect 分离),
- * 本仓库提供其底层支撑(listManifests / listObjects / deleteManifest / removeObjects)。
+ * (删除无 manifest 引用的孤儿对象,删除前对每个待删 sha 二次复核指针可达性,
+ * 消除与 publish「先写 CAS 对象、后 rename 指针」窗口的快照竞态,issue #13);
+ * M5 自动 GC 见 gc.ts(plan/collect 分离),
+ * 本仓库提供其底层支撑(listManifests / listObjects / deleteManifest / removeObjects /
+ * recheckOrphans)。
  *
  * Windows 注:fs.rename 在 Windows 上以 MOVEFILE_REPLACE_EXISTING 语义
  * 覆盖已存在的目标,指针替换是原子的;目录 fsync 不可用,依赖 NTFS 元数据日志。
@@ -235,6 +238,15 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** 是否「路径不存在」(唯一可安全当作未发生的读失败;其余 I/O 错误必须向上抛)。 */
+function isEnoent(cause: unknown): boolean {
+  return (
+    typeof cause === 'object' &&
+    cause !== null &&
+    (cause as NodeJS.ErrnoException).code === 'ENOENT'
+  );
 }
 
 /** 写临时文件 + fsync + 原子 rename 到位(不覆盖语义由调用方保证)。 */
@@ -548,13 +560,44 @@ export class ArtifactRepository {
     };
   }
 
-  /** 手动 GC(P1):删除无任何 manifest 引用的孤儿对象,返回被清理的 sha。 */
+  /**
+   * 手动 GC(P1):删除无任何 manifest 引用的孤儿对象,返回被清理的 sha。
+   * 两轮确认制(issue #13):reconcile() 的快照是第一轮;删除前对每个待删
+   * sha 重扫当前全部指针二次复核(第二轮),期间 publish 落下的新指针引用的
+   * 对象会被救回 —— 否则「先写 CAS 对象、后 rename 指针」窗口里的新发布
+   * 会被本函数当成孤儿误删。与在跑 daemon 之间无跨进程互斥,复核把误删
+   * 窗口从整个对账(逐对象读盘算哈希,很慢)压缩到第二轮扫描之后的一瞬。
+   */
   async prune(): Promise<string[]> {
     const report = await this.reconcile();
-    for (const sha of report.unreferenced) {
+    const confirmed = await this.recheckOrphans(report.unreferenced);
+    for (const sha of confirmed) {
       await rm(this.#objectPath(sha), { force: true });
     }
-    return report.unreferenced;
+    return confirmed;
+  }
+
+  /**
+   * 孤儿删除前的二次复核(issue #13):重扫当前全部 manifest 指针,返回输入
+   * 中仍无任何指针可达的 sha。损坏指针跳过(与 listManifests 同口径:plan
+   * 快照里可读的指针其对象本就在 in-use 集,不会进待删名单,口径一致)。
+   * 供 prune() 与自动 GC 的 collect(artifacts/gc.ts)在删除前调用。
+   */
+  async recheckOrphans(shas: readonly string[]): Promise<string[]> {
+    const referenced = new Set<string>();
+    for (const pointer of await walkFiles(join(this.#root, 'manifests'))) {
+      let manifest: StoredManifest;
+      try {
+        manifest = this.#parseManifest(
+          await readFile(pointer, 'utf8'),
+          pointer,
+        );
+      } catch {
+        continue; // 损坏指针:与 plan 快照同口径跳过。
+      }
+      for (const entry of manifest.entries) referenced.add(entry.sha256);
+    }
+    return shas.filter((sha) => !referenced.has(sha));
   }
 
   /** 孤儿 staging 扫描清理(daemon 启动时自动 + 手动触发)。 */
@@ -631,8 +674,21 @@ export class ArtifactRepository {
     return shas;
   }
 
-  /** 删除 manifest 指针文件(自动 GC 专用;对象不动,留给下轮孤儿清扫)。 */
-  async deleteManifest(id: string): Promise<boolean> {
+  /**
+   * 删除 manifest 指针文件(自动 GC 专用;对象不动,留给下轮孤儿清扫)。
+   * 版本校验(issue #13):options 带任一期望值时,删除前重读指针比对,
+   * 不匹配(或指针已消失/损坏无法比对)则跳过返回 false —— 防止 plan 快照
+   * 与删除之间该路径被并发 publish 出新版本指针时盲删掉新指针
+   * (读者 NotPublished,其对象下轮还被当孤儿清除,放大竞态)。
+   * 不带期望值的调用保持旧语义(幂等盲删,兼容手工运维)。
+   */
+  async deleteManifest(
+    id: string,
+    options: {
+      readonly expectedVersion?: number;
+      readonly expectedPublishedAt?: string;
+    } = {},
+  ): Promise<boolean> {
     const segments = id.split('/');
     if (segments.length !== 4) {
       throw new InvalidArtifactPath('tenant', id);
@@ -655,6 +711,34 @@ export class ArtifactRepository {
       if (!SEGMENT_RE.test(value)) throw new InvalidArtifactPath(kind, value);
     }
     const pointerPath = join(this.#root, 'manifests', tenant, task, node, name);
+    if (
+      options.expectedVersion !== undefined ||
+      options.expectedPublishedAt !== undefined
+    ) {
+      let manifest: StoredManifest;
+      try {
+        manifest = this.#parseManifest(
+          await readFile(pointerPath, 'utf8'),
+          pointerPath,
+        );
+      } catch {
+        // 已不存在(ENOENT,幂等视为已删)或损坏无法比对:本轮保守跳过,
+        // 留给下一轮重新判定,绝不盲删。
+        return false;
+      }
+      if (
+        options.expectedVersion !== undefined &&
+        manifest.version !== options.expectedVersion
+      ) {
+        return false; // 并发已发布新版本:期望是过期快照,跳过。
+      }
+      if (
+        options.expectedPublishedAt !== undefined &&
+        manifest.publishedAt !== options.expectedPublishedAt
+      ) {
+        return false;
+      }
+    }
     try {
       await rm(pointerPath);
       return true;
@@ -733,7 +817,10 @@ export class ArtifactRepository {
       : parsed.policy;
   }
 
-  /** 读当前 manifest 指针;不存在返回 null,损坏抛 ManifestCorrupt。 */
+  /** 读当前 manifest 指针;仅 ENOENT(确实未发布)返回 null;损坏抛
+   * ManifestCorrupt;其余 I/O 错误(EPERM/EISDIR/…)向上抛 —— 吞掉它们会把
+   * 瞬时故障当成「从未发布」,publish 的 version 会从 1 重算并覆盖历史指针
+   * (版本单调承诺被破坏,issue #13)。 */
   async #readManifest(
     ns: ArtifactNamespace,
     node: string,
@@ -743,8 +830,9 @@ export class ArtifactRepository {
     let raw: string;
     try {
       raw = await readFile(pointerPath, 'utf8');
-    } catch {
-      return null;
+    } catch (cause) {
+      if (isEnoent(cause)) return null;
+      throw cause;
     }
     return this.#parseManifest(raw, pointerPath);
   }

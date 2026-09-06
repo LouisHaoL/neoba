@@ -487,3 +487,46 @@ describe('CAS 工件仓库:跨 tenant/task 隔离', () => {
     await assert.rejects(repo.read(nsB, 'agent', 'secret.txt'), NotPublished);
   });
 });
+
+// ---------------------------------------------------------------- #readManifest 错误区分(#13)
+
+describe('#readManifest 错误区分(#13):仅 ENOENT 当「未发布」', () => {
+  it('非 ENOENT 读错误向上抛:resolve 不再返回 null,publish 不静默重算 version', async () => {
+    const { root, repo } = await makeRepo();
+    // 指针位置上是一个目录:readFile → EISDIR(Windows/POSIX 一致),非 ENOENT。
+    // 可测形态,等价于 Windows 杀毒/索引器造成的瞬时 EPERM。
+    await mkdir(join(root, 'manifests', 'acme', 'task-1', 'n', 'haunted'), {
+      recursive: true,
+    });
+    await assert.rejects(repo.resolve(nsA, 'n', 'haunted'), (error: unknown) => {
+      assert.equal((error as NodeJS.ErrnoException).code, 'EISDIR');
+      return true;
+    });
+    // publish 同样不把它当「从未发布」:直接失败,而不是 version 从 1 重算。
+    await assert.rejects(repo.publish(nsA, 'n', 'haunted', 'x'), (error: unknown) => {
+      assert.equal((error as NodeJS.ErrnoException).code, 'EISDIR');
+      return true;
+    });
+  });
+
+  it('publish 遇到非 ENOENT 指针读错误不会覆盖历史指针(version 不回卷)', async () => {
+    const { root, repo } = await makeRepo();
+    const v1 = await repo.publish(nsA, 'n', 'doc', 'v1');
+    assert.equal(v1.version, 1);
+    // 已有 version 1 指针,把指针文件替换成目录(非 ENOENT 读错误)。
+    const pointer = join(root, 'manifests', 'acme', 'task-1', 'n', 'doc');
+    await rm(pointer);
+    await mkdir(pointer);
+    // 修复前:catch { return null } 会把 EISDIR 当「从未发布」,version 从 1
+    // 重算;修复后:错误向上抛,publish 失败,历史指针不被回卷覆盖。
+    await assert.rejects(repo.publish(nsA, 'n', 'doc', 'v2'), (error: unknown) => {
+      assert.equal((error as NodeJS.ErrnoException).code, 'EISDIR');
+      return true;
+    });
+    // 失败的 publish 没有落下任何 version 1 的新指针(目录还在原位)。
+    await assert.rejects(repo.resolve(nsA, 'n', 'doc'), (error: unknown) => {
+      assert.equal((error as NodeJS.ErrnoException).code, 'EISDIR');
+      return true;
+    });
+  });
+});
