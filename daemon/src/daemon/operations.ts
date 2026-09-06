@@ -189,7 +189,7 @@ export class Operations {
       case 'artifacts.read':
         return this.artifactRead(params, identity);
       case 'grants.of':
-        return this.grantsOf(params);
+        return this.grantsOf(params, identity);
       case 'workflow.run':
         return this.workflowRun(params, identity);
       case 'task.pause':
@@ -211,7 +211,7 @@ export class Operations {
       case 'models.list':
         return this.modelsList();
       case 'models.feedback':
-        return this.modelsFeedback(params);
+        return this.modelsFeedback(params, identity);
       case 'events.list':
         return this.eventsList(params, identity);
       default:
@@ -503,9 +503,25 @@ export class Operations {
       : { encoding: 'utf8', data: utf8, size: bytes.byteLength };
   }
 
-  async grantsOf(params: unknown): Promise<unknown> {
+  /**
+   * grants.of(#10):session 身份只能查本人 (tenant, session) 命名空间内
+   * agent 的授权清单 —— agent_id 的 task 段反查 TaskRecord 比对前两层
+   * (approvals.list/decide 的既有口径),异主或 task 不存在一律
+   * SESSION_FORBIDDEN,不给跨租户探测空间;admin(bootstrap)不受限,现语义。
+   */
+  async grantsOf(params: unknown, identity: RequestIdentity = ADMIN_IDENTITY): Promise<unknown> {
     const p = requireObject(params, 'grants.of');
     const agentId = requireString(p, 'agent_id', 'grants.of');
+    if (identity.kind === 'session') {
+      const tenant = identity.tenant ?? DEFAULT_TENANT;
+      const session = identity.session ?? '';
+      const idx = agentId.indexOf('/');
+      const taskId = idx > 0 ? agentId.slice(0, idx) : agentId;
+      const record = this.#ctx.tasks.get(taskId);
+      if (record === undefined || record.tenant !== tenant || record.session !== session) {
+        throw new SessionForbidden(tenant, session);
+      }
+    }
     return { manifest: this.#ctx.tasks.manifest(agentId) ?? null };
   }
 
@@ -857,12 +873,26 @@ export class Operations {
 
   // ---------------------------------------------------------------- P2:模型评分
 
+  /**
+   * models.list(#10 现状保留):只读聚合观测(EMA observed/samples/tier_fit),
+   * 不含 tenant/principal 等敏感数据 —— 所有已认证身份(admin/session)可读。
+   */
   async modelsList(): Promise<unknown> {
     return { models: this.#ctx.models?.registry.entries ?? [] };
   }
 
-  /** 人工/主控反馈(§3.9 EMA);registry 不可变替换后回写持久化文件。 */
-  async modelsFeedback(params: unknown): Promise<unknown> {
+  /**
+   * 人工/主控反馈(§3.9 EMA);registry 不可变替换后回写持久化文件。
+   * #10 收窄为仅 admin 可写:modelscore 注册表是 daemon 全局单例
+   * (plancheck 模型准入按 tier_fit ∩ allowed_models 判空,调度据此择模型),
+   * 数据模型无 tenant 维度,按租户隔离评分需另立数据模型;会话 token 若可写
+   * 即可跨租户污染全体租户的准入与调度决策,故写权收归主控(admin),
+   * session 身份 → SESSION_FORBIDDEN。
+   */
+  async modelsFeedback(params: unknown, identity: RequestIdentity = ADMIN_IDENTITY): Promise<unknown> {
+    if (identity.kind === 'session') {
+      throw new SessionForbidden(identity.tenant ?? DEFAULT_TENANT, identity.session ?? '');
+    }
     const store = this.#ctx.models;
     if (store === undefined) {
       throw new RpcError(-32020, 'models.feedback: daemon 未配置模型评分注册表', {
