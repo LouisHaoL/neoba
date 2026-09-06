@@ -125,6 +125,8 @@ interface RunState {
    * 等待它拿新终态,而不是已 settle 的 run() 旧 promise。
    */
   settling: Promise<WorkflowRunResult> | null;
+  /** 最近一次挂起(paused)的定位节点;budget_paused 形态取消收尾时用作 failedNode(#17)。 */
+  pausedNode?: string;
 }
 
 export class WorkflowEngine {
@@ -180,10 +182,29 @@ export class WorkflowEngine {
     return this.#runs.get(taskId)?.gate.pause() ?? false;
   }
 
-  /** 取消:立即协作终止执行中节点并按 cancelled 收尾(终态)。 */
+  /**
+   * 取消:立即协作终止执行中节点并按 cancelled 收尾(终态)。
+   * 两种形态(issue #17):
+   * - 运行中 / 外部暂停:abort 经 gate 信号被 #loop 消费(GateAborted),
+   *   走正常取消收尾;
+   * - budget_paused 已挂起(#loop 已退出,任务 paused 但 run 仍在 #runs):
+   *   abort 已无人消费 —— 直接走与 GateAborted 相同的收尾(补落
+   *   node.failed(cancelled)、终态 cancelled、从 #runs 摘除),否则任务
+   *   永远 paused,activeTaskIds() 留僵尸。
+   */
   cancel(taskId: string): boolean {
     const state = this.#runs.get(taskId);
     if (state === undefined) return false;
+    if (state.status === 'paused') {
+      state.gate.abort();
+      // 先出表再异步收尾:resume / 重复 cancel 立即看到终态(RunUnknown/false),
+      // 收尾只是补事件与产出终态结果(run() 的 promise 早已以 paused 落定)。
+      this.#runs.delete(taskId);
+      void this.#finishCancelled(state).catch(() => {
+        // 收尾失败(如事件落盘异常)不回滚:出表即终态,避免僵尸复活。
+      });
+      return true;
+    }
     return state.gate.abort();
   }
 
@@ -262,6 +283,14 @@ export class WorkflowEngine {
         result = await this.#loop(state);
       }
       if (result.status === 'paused') {
+        if (state.gate.aborted) {
+          // 取消落在 budget 排空 / 熔断窗口:loop 以 paused 返回,但 gate 已被
+          // abort —— 不会再有 resume 消费这次挂起。走与 GateAborted 相同的
+          // 收尾,终态 cancelled(issue #17:否则任务永远 paused,#runs 留僵尸)。
+          this.#runs.delete(state.params.taskId);
+          return await this.#finishCancelled(state);
+        }
+        state.pausedNode = result.failedNode;
         state.status = 'paused';
       } else {
         this.#runs.delete(state.params.taskId);
@@ -405,44 +434,7 @@ export class WorkflowEngine {
       }
     } catch (err) {
       if (err instanceof GateAborted) {
-        // 先收割已结算条目:取消瞬间刚结算的节点(executor 已自行落 node.failed)
-        // 照常记账;已完成者标记完成,取消/失败者作为 failedNode 依据。
-        let current: WorkflowNodeSpec | undefined;
-        for (const entry of this.#takeSettled(state)) {
-          if (entry.error !== undefined) {
-            current ??= entry.spec;
-            continue;
-          }
-          if (entry.result === undefined) continue;
-          if (entry.result.status === 'completed') {
-            state.completed.add(entry.spec.id);
-            state.outputs.set(entry.spec.id, entry.result.outputs);
-            continue;
-          }
-          current ??= entry.spec;
-        }
-        const reaped = current !== undefined;
-        // 派发边界被取消:命中的节点未 started、未落事件,补 node.failed 让重放可重建 cancelled 终态。
-        current ??= order.find((n) => !state.completed.has(n.id));
-        if (!reaped && current !== undefined && this.#deps.emit !== undefined) {
-          // 派发边界被取消:该节点未 started,补一条 node.failed 让重放可重建 cancelled 终态。
-          await this.#deps.emit({
-            type: 'node.failed',
-            principal: {
-              tenant: params.tenant,
-              session: params.session,
-              task: params.taskId,
-              agent: `${params.taskId}/${current.id}`,
-            },
-            payload: { nodeId: current.id, attempt: state.attempts.get(current.id) ?? 0, reason: 'cancelled', detail: '执行被取消' },
-          });
-        }
-        return finalize(state, {
-          status: 'cancelled',
-          ...(current !== undefined ? { failedNode: current.id } : {}),
-          failReason: 'cancelled',
-          detail: '执行被取消',
-        });
+        return this.#finishCancelled(state);
       }
       throw err;
     }
@@ -453,7 +445,7 @@ export class WorkflowEngine {
       if (!evidence.must_exist) continue;
       const ref = await this.#deps.artifacts.resolve(ns, evidence.node, evidence.artifact);
       if (ref === null) {
-        return finalize(state, {
+        return await this.#finalizeFailed(state, {
           status: 'failed',
           failedNode: evidence.node,
           failReason: 'evidence_missing',
@@ -464,7 +456,7 @@ export class WorkflowEngine {
         try {
           await this.#deps.artifacts.verify(ns, evidence.node, evidence.artifact);
         } catch (err) {
-          return finalize(state, {
+          return await this.#finalizeFailed(state, {
             status: 'failed',
             failedNode: evidence.node,
             failReason: 'evidence_corrupt',
@@ -481,7 +473,7 @@ export class WorkflowEngine {
       const nodeOutputs = state.outputs.get(decl.from) ?? [];
       if (nodeOutputs.length === 0) {
         if (decl.required) {
-          return finalize(state, {
+          return await this.#finalizeFailed(state, {
             status: 'failed',
             failedNode: decl.from,
             failReason: 'output_unresolved',
@@ -497,6 +489,107 @@ export class WorkflowEngine {
       }));
     }
     return finalize(state, { status: 'completed', outputs });
+  }
+
+  /**
+   * 取消收尾(GateAborted 捕获与 budget_paused 形态取消共用,issue #17):
+   * 先收割已结算条目 —— 取消瞬间刚结算的节点照常记账;已完成者标记完成,
+   * 取消/失败者作为 failedNode 依据。取消本身通常无事件(派发边界被取消的
+   * 节点未 started;挂起形态的失败事件映射为 paused),补一条
+   * node.failed(cancelled) 让 TaskStore / 重放推进到 cancelled 终态;
+   * 最后 finalize cancelled。
+   */
+  async #finishCancelled(state: RunState): Promise<WorkflowRunResult> {
+    const params = state.params;
+    let current: WorkflowNodeSpec | undefined;
+    // 收割的失败条目若为 budget_paused:其失败事件把 TaskStore 映射为 paused
+    // (非终态),不能按"executor 已落过失败事件"跳过 —— 仍须补落
+    // node.failed(cancelled) 才能推进到终态(issue #17)。
+    let currentBudgetPaused = false;
+    for (const entry of this.#takeSettled(state)) {
+      if (entry.error !== undefined) {
+        current ??= entry.spec;
+        continue;
+      }
+      if (entry.result === undefined) continue;
+      if (entry.result.status === 'completed') {
+        state.completed.add(entry.spec.id);
+        state.outputs.set(entry.spec.id, entry.result.outputs);
+        continue;
+      }
+      if (current === undefined) {
+        current = entry.spec;
+        currentBudgetPaused = entry.result.reason === 'budget_paused';
+      }
+    }
+    const reapedFailure = current !== undefined;
+    if (!reapedFailure) {
+      // 无收割失败:优先用挂起定位节点(budget_paused 形态的熔断节点),
+      // 否则取拓扑序首个未完成节点(派发边界被取消的节点)。
+      current = state.pausedNode !== undefined
+        ? state.order.find((n) => n.id === state.pausedNode)
+        : undefined;
+      current ??= state.order.find((n) => !state.completed.has(n.id));
+    }
+    if (current !== undefined && this.#deps.emit !== undefined && (!reapedFailure || currentBudgetPaused)) {
+      await this.#deps.emit({
+        type: 'node.failed',
+        principal: {
+          tenant: params.tenant,
+          session: params.session,
+          task: params.taskId,
+          agent: `${params.taskId}/${current.id}`,
+        },
+        payload: {
+          nodeId: current.id,
+          attempt: state.attempts.get(current.id) ?? 0,
+          reason: 'cancelled',
+          detail: '执行被取消',
+        },
+      });
+    }
+    return finalize(state, {
+      status: 'cancelled',
+      ...(current !== undefined ? { failedNode: current.id } : {}),
+      failReason: 'cancelled',
+      detail: '执行被取消',
+    });
+  }
+
+  /**
+   * 终检失败收尾(issue #17):evidence_missing / evidence_corrupt /
+   * output_unresolved 三条 finalize-failed 路径原先只经返回值表达 failed ——
+   * TaskStore 由 node.completed 驱动,全部节点完成后已把任务置 completed,
+   * 重放同样 completed,状态面永远显示 completed。这里补落 node.failed,
+   * 让 TaskStore 与重放同构推进到 failed。
+   */
+  async #finalizeFailed(
+    state: RunState,
+    result: {
+      readonly status: 'failed';
+      readonly failedNode: string;
+      readonly failReason: string;
+      readonly detail: string;
+    },
+  ): Promise<WorkflowRunResult> {
+    if (this.#deps.emit !== undefined) {
+      await this.#deps.emit({
+        type: 'node.failed',
+        principal: {
+          tenant: state.params.tenant,
+          session: state.params.session,
+          task: state.params.taskId,
+          agent: `${state.params.taskId}/${result.failedNode}`,
+        },
+        payload: {
+          nodeId: result.failedNode,
+          attempt: state.attempts.get(result.failedNode) ?? 0,
+          reason: result.failReason,
+          detail: result.detail,
+        },
+      });
+    }
+    return finalize(state, result);
   }
 
   /** 重试判定:crash/output_missing 按 on 含 crash;timeout 额外要求幂等。 */

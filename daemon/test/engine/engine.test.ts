@@ -5,7 +5,7 @@
  * 必需输出未解析、重复执行拒绝。
  */
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -20,6 +20,7 @@ import { MemoryProvider } from '../../src/provision/index.ts';
 import { NodeExecutor } from '../../src/engine/index.ts';
 import { RunDuplicate } from '../../src/engine/index.ts';
 import { RunNotPaused } from '../../src/engine/index.ts';
+import { RunUnknown } from '../../src/engine/index.ts';
 import { WorkflowEngine } from '../../src/engine/index.ts';
 import type { NodeRunContext, NodeRuntime, RuntimeResult } from '../../src/engine/index.ts';
 
@@ -64,6 +65,8 @@ interface Harness {
   events: Event[];
   artifacts: ArtifactRepository;
   calls: ReadonlyMap<string, number>;
+  /** CAS 仓库根目录(证据损坏用例直接篡改对象文件)。 */
+  dir: string;
 }
 
 /** runtime 路由器:按 nodeId 分发,记录每节点调用次数。 */
@@ -118,6 +121,7 @@ function inventoryEvent() {
 async function setup(
   presets: Readonly<Record<string, Preset>>,
   runtime: NodeRuntime & { readonly calls?: ReadonlyMap<string, number> },
+  opts: { readonly engineEmit?: boolean } = {},
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), 'neoba-engine-'));
   const artifacts = await ArtifactRepository.open(dir);
@@ -135,8 +139,14 @@ async function setup(
   };
   const provider = new MemoryProvider();
   const executor = new NodeExecutor({ provider, runtime, artifacts, grants, emit });
-  const engine = new WorkflowEngine({ executor, artifacts, presets });
-  return { engine, events, artifacts, calls: runtime.calls ?? new Map() };
+  // engineEmit:引擎自身的事件出口(取消/终检失败收尾的补落事件走它,#17)。
+  const engine = new WorkflowEngine({
+    executor,
+    artifacts,
+    presets,
+    ...(opts.engineEmit === true ? { emit } : {}),
+  });
+  return { engine, events, artifacts, calls: runtime.calls ?? new Map(), dir };
 }
 
 function eventsOf(events: readonly Event[], type: EventType, nodeId?: string): Event[] {
@@ -153,6 +163,21 @@ async function waitFor(predicate: () => boolean, what: string): Promise<void> {
     if (Date.now() > deadline) throw new Error(`等待超时: ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+/** 篡改 CAS 对象内容制造损坏(verify 重算哈希不匹配 → evidence_corrupt)。 */
+async function corruptObject(root: string, content: string): Promise<void> {
+  const objectsDir = join(root, 'objects');
+  const entries = await readdir(objectsDir, { recursive: true, withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const path = join(entry.parentPath, entry.name);
+    if ((await readFile(path, 'utf8')) === content) {
+      await writeFile(path, 'corrupted-payload');
+      return;
+    }
+  }
+  throw new Error(`未找到内容为 ${JSON.stringify(content)} 的 CAS 对象`);
 }
 
 const TWO_NODES: readonly WorkflowNodeSpec[] = [
@@ -698,5 +723,73 @@ describe('engine/WorkflowEngine', () => {
     assert.equal(result.failReason, 'output_missing');
     const failed = eventsOf(events, 'node.failed', 'n1');
     assert.equal((failed[0]?.payload as { reason: string }).reason, 'output_missing');
+  });
+
+  // ---------------------------------------------------------------- issue #17 回归
+
+  it('#17 budget_paused 后 cancel:补落 node.failed(cancelled),终态 cancelled,#runs 清空', async () => {
+    const ledger = new BudgetLedger({ limitTokens: 100 }, { emit: () => {} });
+    const runtime = router({
+      n1: () => ({ exitCode: 0, events: [usageEvent(150, 0)], artifacts: [{ name: 'code', payload: 'x' }] }),
+    });
+    const { engine, events } = await setup({ coder: preset('coder') }, runtime, { engineEmit: true });
+    const first = await engine.run({
+      tenant: 't1',
+      session: null,
+      taskId: 'task-budget-cancel',
+      workflow: workflow([{ id: 'n1', preset: 'coder' }]),
+      budget: ledger,
+    });
+    assert.equal(first.status, 'paused');
+    assert.ok(engine.activeTaskIds().includes('task-budget-cancel'), '挂起期间 run 留在 #runs');
+
+    // 修复前:cancel 只 gate.abort(),loop 已退出无人消费 —— 任务永远 paused。
+    assert.equal(engine.cancel('task-budget-cancel'), true);
+    // 收尾补落 node.failed(cancelled)(异步落事件,轮询等待)。
+    await waitFor(
+      () => eventsOf(events, 'node.failed', 'n1').some((e) => (e.payload as { reason: string }).reason === 'cancelled'),
+      'node.failed(cancelled) 补落',
+    );
+    assert.equal(engine.activeTaskIds().includes('task-budget-cancel'), false, '#runs 已清空');
+    assert.equal(engine.cancel('task-budget-cancel'), false, '终态出表,再取消无目标');
+    await assert.rejects(() => engine.resume('task-budget-cancel'), RunUnknown);
+  });
+
+  it('#17 证据损坏:evidence_corrupt 补落 node.failed,终态 failed(重放可重建)', async () => {
+    let releaseN2: (() => void) | null = null;
+    const runtime = router({
+      n1: (ctx) => ok(ctx),
+      n2: (ctx) =>
+        new Promise<RuntimeResult>((resolve) => {
+          releaseN2 = () => resolve(ok(ctx));
+        }),
+    });
+    const { engine, events, dir } = await setup({ coder: preset('coder') }, runtime, { engineEmit: true });
+    const runP = engine.run({
+      tenant: 't1',
+      session: null,
+      taskId: 'task-ev-corrupt',
+      workflow: workflow([
+        { id: 'n1', preset: 'coder' },
+        { id: 'n2', preset: 'coder', inputs: [{ from: 'n1' }] },
+      ], {
+        evidence: [{ node: 'n1', artifact: 'code', must_exist: true, sha256_recorded: true }],
+      }),
+    });
+    // n1 完成(产物已进 CAS)、n2 在飞:篡改 n1 的 CAS 对象制造损坏。
+    await waitFor(
+      () => eventsOf(events, 'node.completed', 'n1').length === 1 && releaseN2 !== null,
+      'n1 完成 ∧ n2 在飞',
+    );
+    await corruptObject(dir, 'artifact of n1');
+    releaseN2!();
+    const result = await runP;
+    assert.equal(result.status, 'failed');
+    assert.equal(result.failReason, 'evidence_corrupt');
+    const failed = eventsOf(events, 'node.failed', 'n1');
+    assert.ok(
+      failed.some((e) => (e.payload as { reason: string }).reason === 'evidence_corrupt'),
+      '终检失败补落 node.failed(evidence_corrupt)',
+    );
   });
 });
