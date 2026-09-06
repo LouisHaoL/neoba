@@ -18,14 +18,18 @@ import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import {
   EVENT_LOG_VERSION,
+  EventBrokenTail,
   EventCorrupt,
   EventLog,
   EventLogClosed,
+  EventRepairConflict,
   InvalidEvent,
+  repairTruncatedTail,
   shardByTask,
   type Event,
   type EventLogOptions,
   type Principal,
+  type QuarantinedRecord,
   type ReplayOptions,
 } from '../../src/events/index.ts';
 
@@ -173,7 +177,7 @@ describe('事件日志:崩溃截断处理', () => {
     await third.close();
   });
 
-  it('repair=false 时不修剪:重放仍丢弃半行,但文件字节保持原样', async () => {
+  it('repair=false 时不修剪:重放仍丢弃半行,但文件字节保持原样;此后 append 被拒绝(#21 附带)', async () => {
     const { root, log } = await makeLog({ repair: false });
     await log.append({ type: 'daemon.started', principal: daemonLevel, payload: { pid: 1 } });
     await log.close();
@@ -184,6 +188,12 @@ describe('事件日志:崩溃截断处理', () => {
     const events = await collect(reopened);
     assert.equal(events.length, 1);
     assert.equal((await rawFile(root)).length, size); // 未修剪
+    // 残行不带换行符,此刻追加会与新事件拼成一行造成永久损坏 → 拒绝。
+    await assert.rejects(
+      reopened.append({ type: 'daemon.started', principal: daemonLevel, payload: { pid: 2 } }),
+      EventBrokenTail,
+    );
+    assert.equal((await rawFile(root)).length, size); // 文件字节仍原样
     await reopened.close();
   });
 
@@ -433,5 +443,119 @@ describe('事件日志:对外错误', () => {
       log.append({ type: 'daemon.started', principal: daemonLevel, payload: { pid: 1 } }),
       EventLogClosed,
     );
+  });
+});
+
+// ------------------------------------------------------------ issue #21 回归
+
+describe('事件日志:中段损坏隔离 quarantine(#21)', () => {
+  it('中段坏行 → sidecar 留证 + 重放跳过 + 主文件字节不动 + append 正常续号', async () => {
+    const { root, log } = await makeLog();
+    await log.append({ type: 'daemon.started', principal: daemonLevel, payload: { pid: 1 } });
+    await log.append({ type: 'daemon.started', principal: daemonLevel, payload: { pid: 2 } });
+    await log.close();
+    // 中途损坏:坏行夹在合法事件中间(带换行符,不是崩溃截断形态)
+    await appendFile(join(root, 'events.jsonl'), 'garbage-not-json\n');
+    const goodLine = JSON.stringify({
+      v: EVENT_LOG_VERSION, seq: 3, ts: '2026-09-04T10:00:00Z',
+      type: 'daemon.started', principal: daemonLevel, payload: { pid: 3 },
+    });
+    await appendFile(join(root, 'events.jsonl'), goodLine + '\n');
+    const bytesBefore = (await rawFile(root)).length;
+
+    const reports: QuarantinedRecord[] = [];
+    const reopened = await EventLog.open(root, {
+      quarantine: true,
+      onQuarantined: (r) => reports.push(r),
+    });
+    const events = await collect(reopened);
+    assert.deepEqual(events.map((e) => e.seq), [1, 2, 3]); // 坏行被跳过,前后事件齐全
+    // 主文件字节未动:隔离是复制留证,不是移动(移动需整文件重写,跨进程不安全)
+    assert.equal((await rawFile(root)).length, bytesBefore);
+    // 坏行进了 sidecar,记录行号与原因
+    const sidecar = await readFile(join(root, 'events.jsonl.corrupt'), 'utf8');
+    const record = JSON.parse(sidecar.trim()) as { path: string; line: number; reason: string; raw: string };
+    assert.equal(record.path, 'events.jsonl');
+    assert.equal(record.line, 3);
+    assert.equal(record.reason, '非法 JSON');
+    assert.equal(record.raw, 'garbage-not-json');
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0]?.line, 3);
+    // append 正常续号(坏行不占 seq)
+    const e4 = await reopened.append({ type: 'daemon.started', principal: daemonLevel, payload: { pid: 4 } });
+    assert.equal(e4.seq, 4);
+    await reopened.close();
+
+    // 再次打开:坏行持续被跳过,seq 无空洞
+    const third = await EventLog.open(root, { quarantine: true });
+    assert.deepEqual((await collect(third)).map((e) => e.seq), [1, 2, 3, 4]);
+    await third.close();
+  });
+
+  it('中段空行同样被隔离;缺省(不开 quarantine)仍抛 EventCorrupt 不静默跳过', async () => {
+    const { root, log } = await makeLog({ quarantine: true });
+    await log.append({ type: 'daemon.started', principal: daemonLevel, payload: { pid: 1 } });
+    await log.close();
+    await appendFile(join(root, 'events.jsonl'), '\n');
+
+    const reopened = await EventLog.open(root, { quarantine: true });
+    const events = await collect(reopened);
+    assert.equal(events.length, 1);
+    const sidecar = await readFile(join(root, 'events.jsonl.corrupt'), 'utf8');
+    assert.match(sidecar, /"reason":"空行"/);
+    await reopened.close();
+
+    // 库层缺省保持保守:不开 quarantine 依旧抛 EventCorrupt(坏行必须人工过目)
+    const strict = await EventLog.open(root);
+    await assert.rejects(collect(strict), EventCorrupt);
+    await strict.close();
+  });
+});
+
+describe('事件日志:repair 截断的跨进程安全(#21)', () => {
+  it('快照窗口内被并发追加 → 拒绝截断(EventRepairConflict),新事件不丢', async () => {
+    const { root, log } = await makeLog();
+    await log.append({ type: 'daemon.started', principal: daemonLevel, payload: { pid: 1 } });
+    await log.close();
+    const partial = '{"v":"1.0","seq":2,"ts":"2026-09-04T1';
+    await appendFile(join(root, 'events.jsonl'), partial); // 崩溃残行
+
+    // CLI 拿到快照的时刻……
+    const snapshot = await rawFile(root);
+    const cutFrom = snapshot.length - Buffer.byteLength(partial);
+    // ……daemon 在窗口内追加了完整事件(真实场景:daemon 启动修剪残行后追加)
+    const newEvent = JSON.stringify({
+      v: EVENT_LOG_VERSION, seq: 2, ts: '2026-09-04T10:00:00Z',
+      type: 'daemon.started', principal: daemonLevel, payload: { pid: 2 },
+    }) + '\n';
+    await appendFile(join(root, 'events.jsonl'), newEvent);
+
+    // 按过时快照修剪会截掉新事件 → 必须拒绝
+    await assert.rejects(
+      repairTruncatedTail(join(root, 'events.jsonl'), snapshot, cutFrom),
+      EventRepairConflict,
+    );
+    // 新事件字节仍在文件里
+    const after = await readFile(join(root, 'events.jsonl'), 'utf8');
+    assert.ok(after.includes('"pid":2'), '并发追加的事件不得被截掉');
+  });
+
+  it('文件未被并发修改 → 正常修剪残行,重放与追加不受影响', async () => {
+    const { root, log } = await makeLog();
+    await log.append({ type: 'daemon.started', principal: daemonLevel, payload: { pid: 1 } });
+    await log.close();
+    const partial = '{"v":"1.0","seq":2,"ts":"2026-09-04T1';
+    await appendFile(join(root, 'events.jsonl'), partial);
+
+    const snapshot = await rawFile(root);
+    const cutFrom = snapshot.length - Buffer.byteLength(partial);
+    await repairTruncatedTail(join(root, 'events.jsonl'), snapshot, cutFrom);
+    assert.equal((await rawFile(root)).length, cutFrom); // 残行被修剪
+
+    const reopened = await EventLog.open(root);
+    assert.deepEqual((await collect(reopened)).map((e) => e.seq), [1]);
+    const e2 = await reopened.append({ type: 'daemon.started', principal: daemonLevel, payload: { pid: 2 } });
+    assert.equal(e2.seq, 2);
+    await reopened.close();
   });
 });

@@ -19,7 +19,7 @@
  * `<stateDir>/daemon-state.json`(原子写),不滥用既有事件类型污染审计流。
  */
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -34,7 +34,7 @@ import {
 } from '../capability/index.ts';
 import type { GrantConstraint, LoadedRegistry, Preset, Scope } from '../capability/index.ts';
 import { EventLog } from '../events/index.ts';
-import type { Event } from '../events/index.ts';
+import type { Event, QuarantinedRecord } from '../events/index.ts';
 import { recoverFromLog } from '../events/recover.ts';
 import type { RecoverReport } from '../events/recover.ts';
 import { SessionRegistry, defaultProfile } from '../session/index.ts';
@@ -62,6 +62,7 @@ import { replayTasks, TaskStore } from './tasks.ts';
 
 export const DAEMON_VERSION = '0.1.0';
 const STATE_FILE_NAME = 'daemon-state.json';
+const LOCK_FILE_NAME = 'daemon.lock';
 
 export interface DaemonOptions {
   /** 状态目录;缺省 ~/.neoba/。 */
@@ -152,22 +153,156 @@ function atomicWrite(path: string, text: string): Promise<void> {
   return writeFile(tmp, text, 'utf8').then(() => rename(tmp, path));
 }
 
+/** daemon.lock 的内容:pid + 启动时间 + 版本(排查用)。 */
+interface InstanceLockInfo {
+  readonly pid: number;
+  readonly startedAt: string;
+  readonly version: string;
+}
+
+/**
+ * 进程存活探测:kill(pid, 0) 不发信号只探存在性。POSIX 上 ESRCH = 不存在;
+ * Windows 上进程存在但属别的用户/受限会话时抛 EPERM —— 同样视为存活(issue #21)。
+ */
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * 单实例守卫(issue #21):stateDir/daemon.lock(PID 锁文件)。双 daemon 同
+ * state-dir 会各持独立 nextSeq 交错追加 → seq 重复/乱序 → 重放 EventCorrupt,
+ * 必须在碰任何状态文件之前挡下第二个实例。
+ *   - 锁存在且 pid 存活 → 抛 DAEMON_ALREADY_RUNNING 拒绝启动;
+ *   - 锁存在但 pid 不存在(崩溃残留)→ 安全接管:删残锁后 O_EXCL('wx')独占重建;
+ *   - 接管窗口被别的进程抢先建锁(EEXIST)→ 重读复核一轮,仍拿不到即拒绝。
+ * 取舍:不引入 mtime 过期 —— pid 存活本身就是过期判据(pid 复用的残余风险
+ * 由锁内容里的 startedAt 供人工排查);锁文件残缺(半写 JSON)按无主锁接管。
+ */
+async function acquireInstanceLock(
+  stateDir: string,
+  version: string,
+): Promise<{ release: () => Promise<void> }> {
+  const lockPath = join(stateDir, LOCK_FILE_NAME);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let lockExists = false;
+    let heldBy: InstanceLockInfo | null = null;
+    try {
+      lockExists = true;
+      heldBy = JSON.parse(await readFile(lockPath, 'utf8')) as InstanceLockInfo;
+    } catch {
+      // ENOENT = 无锁;文件存在但解析失败 = 残缺(半写 JSON)。都是无主锁。
+    }
+    if (lockExists && heldBy !== null && typeof heldBy.pid === 'number' && isPidAlive(heldBy.pid)) {
+      // 有主锁:pid 存活 → 拒绝启动。
+      throw new DaemonError(
+        'DAEMON_ALREADY_RUNNING',
+        `状态目录 ${stateDir} 已有运行中的 daemon(pid ${heldBy.pid},` +
+          `startedAt ${heldBy.startedAt ?? '未知'},version ${heldBy.version ?? '未知'});` +
+          '同一 state-dir 禁止第二个实例(会交错写事件日志 seq)。' +
+          '若确认该进程已死属崩溃残留锁,可删除 daemon.lock 后重试。',
+      );
+    }
+    if (lockExists) {
+      // 锁文件存在但无主(pid 已死的崩溃残留 / 残缺半写):删除后独占重建
+      // 接管。不删的话下方 'wx' 恒 EEXIST,残锁会永久卡死启动。
+      await unlink(lockPath).catch(() => {});
+    }
+    const info: InstanceLockInfo = {
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      version,
+    };
+    try {
+      const fh = await open(lockPath, 'wx'); // O_EXCL 独占创建,防接管窗口被抢先
+      try {
+        await fh.writeFile(JSON.stringify(info, null, 2) + '\n', 'utf8');
+        await fh.sync();
+      } finally {
+        await fh.close().catch(() => {});
+      }
+      return {
+        release: () => unlink(lockPath).catch(() => {}),
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      // 别的进程在接管窗口抢先建锁 → 下一轮重读并按存活锁处理。
+    }
+  }
+  throw new DaemonError(
+    'DAEMON_ALREADY_RUNNING',
+    `状态目录 ${stateDir} 的单实例锁竞争失败,无法获取 daemon.lock`,
+  );
+}
+
 export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandle> {
   const version = opts.daemonVersion ?? DAEMON_VERSION;
   const stateDir = opts.stateDir ?? join(homedir(), '.neoba');
   await mkdir(stateDir, { recursive: true });
 
+  // 0. 单实例守卫(issue #21):先拿锁再碰任何状态文件;启动中途失败也要
+  //    释放锁,不留存活 pid 的残锁卡死后续启动。
+  const lock = await acquireInstanceLock(stateDir, version);
+  try {
+    return await startLocked(opts, version, stateDir, lock.release);
+  } catch (err) {
+    await lock.release();
+    throw err;
+  }
+}
+
+/** startDaemon 主体(单实例锁已持有);任何失败向上抛,由调用方释放锁。 */
+async function startLocked(
+  opts: DaemonOptions,
+  version: string,
+  stateDir: string,
+  releaseLock: () => Promise<void>,
+): Promise<DaemonHandle> {
   // 1. 鉴权 token(§6:每次启动生成,绑定层必携)+ 会话 token 注册表
   //    (M3 双 token 模型:hash 表从 tokens.json 恢复,会话须重新握手激活)。
   const token = opts.token ?? generateToken();
   const tokenFile = await writeTokenFile(stateDir, token);
   const tokens = await TokenRegistry.open(stateDir);
 
-  // 2. 事件日志 + 重放恢复。
-  const events = await EventLog.open(join(stateDir, 'events'));
+  // 2. 事件日志 + 重放恢复。quarantine(issue #21):中段损坏行不再让启动
+  //    变砖 —— 坏行复制进 <分片>.corrupt sidecar、重放跳过,每条隔离记录
+  //    落一条 correction 事件(审计不留静默空洞)并进 warnings 上浮。
+  const quarantined: QuarantinedRecord[] = [];
+  const events = await EventLog.open(join(stateDir, 'events'), {
+    quarantine: true,
+    onQuarantined: (record) => quarantined.push(record),
+  });
   const replayed: Event[] = [];
   for await (const ev of events.replay()) replayed.push(ev);
   const tasks = replayTasks(replayed);
+
+  // 启动期 correction:重放阶段被隔离的中段坏行。refSeq 取 0(坏行读不出
+  // 可信 seq),target 指向 分片#行号,detail 说明 sidecar 位置。
+  const startedPrincipal = {
+    tenant: DEFAULT_TENANT,
+    session: null,
+    task: null,
+    agent: null,
+  };
+  for (const record of quarantined) {
+    await events.append({
+      type: 'correction',
+      principal: startedPrincipal,
+      payload: {
+        refSeq: 0,
+        target: `eventlog:${record.path}#${record.line}`,
+        reason: 'quarantine',
+        detail:
+          `${record.reason}: 第 ${record.line} 行已隔离到 ${record.path}.corrupt sidecar` +
+          '(重放跳过,主文件字节未动),原行前 120 字节: ' + record.raw.slice(0, 120),
+      },
+    });
+  }
 
   // 3. 工件仓库 / 注册表 / 会话表 / 基线授予执行器(EventLog 即审计 sink)。
   const artifacts = await ArtifactRepository.open(join(stateDir, 'artifacts'));
@@ -295,12 +430,6 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
   // 4. daemon 生命周期事件:started(必记)+ 恢复对账(§6:in-flight 资源
   //    逐个查 provider 实态,correction 落同一份日志,daemon.recovered 收尾)。
   //    首次启动(无可重放历史)不记 recovered,保持事件流干净。
-  const startedPrincipal = {
-    tenant: DEFAULT_TENANT,
-    session: null,
-    task: null,
-    agent: null,
-  };
   await events.append({
     type: 'daemon.started',
     principal: startedPrincipal,
@@ -379,7 +508,14 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
   const boundPort = typeof address === 'object' && address !== null ? address.port : port;
 
   const statePath = join(stateDir, STATE_FILE_NAME);
-  const warnings = tokenFile.warnings;
+  // 启动期告警:token 权限尽力而为 + 事件日志中段坏行隔离(issue #21)。
+  const warnings: string[] = [
+    ...tokenFile.warnings,
+    ...quarantined.map(
+      (r) =>
+        `事件日志 ${r.path} 第 ${r.line} 行${r.reason},已隔离到 ${r.path}.corrupt sidecar(重放跳过,correction 事件已落盘)`,
+    ),
+  ];
   // escalation TTL 回收守护(§3.3):周期扫描到期授予并补记 grant.revoked。
   const reclaimIntervalMs = opts.reclaimIntervalMs ?? 30_000;
   const reclaimTimer = reclaimIntervalMs > 0
@@ -465,6 +601,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<DaemonHandl
       );
       await artifacts.close();
       await events.close();
+      // 释放单实例锁(issue #21):stop 正常收尾后,后续启动不再被本实例挡下。
+      await releaseLock();
     },
   };
   return handle;

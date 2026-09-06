@@ -261,7 +261,11 @@ export async function defaultDeps(overrides: Partial<CliDeps> = {}): Promise<Cli
       writeConfig(report as DoctorReport, configPath),
     defaultConfigPath: () => defaultConfigPath(),
     execProbe: (cmd, args) => execProbe(cmd, [...args]),
-    openRepository: (root) => ArtifactRepository.open(root),
+    // issue #21:CLI 打开仓库默认不清 staging。CLI(prune 等)可能在 daemon
+    // 运行中执行,清理会把在写 staging 目录连同半写文件一起 rm -rf,publish
+    // 直接失败。孤儿 staging 的清理交由 daemon 启动时自身的 cleanStaging
+    // (仓库默认开,daemon 才是 staging 的唯一写者)负责。
+    openRepository: (root) => ArtifactRepository.open(root, { cleanStaging: false }),
     spawnBridge: (opts) => spawnBridge(opts),
     fetch: (input, init) => fetch(input, init),
     homedir: () => osHomedir(),
