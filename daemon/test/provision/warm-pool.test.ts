@@ -15,7 +15,15 @@ import type { GateEmit } from '../../src/provision/pool.ts';
 import type { SandboxHandle, SandboxProvider, SandboxSpec } from '../../src/provision/index.ts';
 
 /** 记录调用序 + snapshot 能力可开关的 provider 桩。 */
-function fakeProvider(opts: { snapshotCapable?: boolean; snapshotFails?: boolean; unhealthy?: boolean } = {}) {
+function fakeProvider(
+  opts: {
+    snapshotCapable?: boolean;
+    snapshotFails?: boolean;
+    unhealthy?: boolean;
+    createFails?: boolean;
+    restoreFails?: boolean;
+  } = {},
+) {
   const calls: string[] = [];
   const restoredRefs: string[] = [];
   let n = 0;
@@ -29,6 +37,7 @@ function fakeProvider(opts: { snapshotCapable?: boolean; snapshotFails?: boolean
     ...(opts.snapshotCapable === true ? { snapshotCapable: true } : {}),
     create: async (spec: SandboxSpec): Promise<SandboxHandle> => {
       calls.push(`create:${spec.labels?.['neoba.node'] ?? '?'}`);
+      if (opts.createFails === true) throw new Error('create boom');
       n += 1;
       return {
         id: `sbx-${n}`,
@@ -52,6 +61,7 @@ function fakeProvider(opts: { snapshotCapable?: boolean; snapshotFails?: boolean
     },
     restore: async (ref: string): Promise<SandboxHandle> => {
       calls.push(`restore:${ref}`);
+      if (opts.restoreFails === true) throw new Error('restore boom');
       restoredRefs.push(ref);
       n += 1;
       return {
@@ -259,5 +269,54 @@ describe('provision/WarmPool(不支持 snapshot 的后端:直通退化)', () => 
     await pool.release(h.handle); // 健康探针通过也一样销毁
     assert.deepEqual(inner.calls, ['create:n1', 'destroy:sbx-1']);
     assert.equal(pool.size, 0);
+  });
+});
+
+describe('provision/WarmPool(acquire 失败路径:不泄漏 gate 槽位,#12)', () => {
+  it('真池化冷拉 create 抛错 → 槽位归还,后续 acquire 仍能成功', async () => {
+    const inner = fakeProvider({ snapshotCapable: true, createFails: true });
+    const { g } = gateOf(1);
+    const pool = new WarmPool({ provider: inner, gate: g });
+
+    await assert.rejects(pool.acquire(specOf('n1')), /create boom/);
+    assert.equal(g.inUse, 0); // 失败即归还,不再占槽
+    assert.equal(g.waiting, 0);
+
+    // 槽位恢复后 gate 不死锁:重建 provider 后续 acquire 正常走通
+    const ok = new WarmPool({ provider: fakeProvider({ snapshotCapable: true }), gate: g });
+    const h = await ok.acquire(specOf('n2'));
+    assert.equal(g.inUse, 1);
+    await ok.release(h.handle, { healthy: true });
+    assert.equal(g.inUse, 0);
+  });
+
+  it('restore 回热抛错 → 槽位归还,孤儿 snapshot 引用不残留池内', async () => {
+    const inner = fakeProvider({ snapshotCapable: true, restoreFails: true });
+    const { g } = gateOf(1);
+    const pool = new WarmPool({ provider: inner, gate: g });
+
+    // 先正常回池一个条目,再让下一次 acquire 命中 restore 时抛错
+    const h1 = await pool.acquire(specOf('n1'));
+    await pool.release(h1.handle, { healthy: true });
+    assert.equal(pool.size, 1);
+
+    await assert.rejects(pool.acquire(specOf('n2')), /restore boom/);
+    assert.equal(g.inUse, 0); // 失败即归还槽位
+    assert.equal(pool.size, 0); // 已 splice 出池的条目不回填,池内无孤儿引用
+    assert.deepEqual(inner.calls.slice(-2), ['destroy:sbx-1', 'restore:snap-sbx-1']); // 只尝试了一次 restore
+  });
+
+  it('直通退化路径(!pooling)create 抛错 → 槽位同样归还', async () => {
+    const inner = fakeProvider({ createFails: true }); // 未声明 snapshotCapable
+    const { g, events } = gateOf(1);
+    const pool = new WarmPool({ provider: inner, gate: g });
+
+    await assert.rejects(pool.acquire(specOf('n1')), /create boom/);
+    assert.equal(g.inUse, 0);
+    // 事件兜底路径同样收尾:acquired 后有 released
+    assert.deepEqual(
+      events.map((e) => e.type),
+      ['sandbox.acquired', 'sandbox.released'],
+    );
   });
 });
