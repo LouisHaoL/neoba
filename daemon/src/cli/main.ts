@@ -2,7 +2,7 @@
 /**
  * neoba CLI 入口(§3.10):人肉调试与兜底壳。
  *
- *   neoba start [--state-dir DIR] [--port N] [--foreground]
+ *   neoba start [--state-dir DIR] [--port N] [--presets DIR] [--registry FILE] [--models FILE] [--foreground]
  *   neoba status [--state-dir DIR] [--json]
  *   neoba doctor [--write] [--json]
  *   neoba prune [--state-dir DIR] [--yes]

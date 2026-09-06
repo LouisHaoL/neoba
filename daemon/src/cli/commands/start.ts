@@ -1,6 +1,13 @@
 /**
  * neoba start:拉起 daemon(§6)。默认(也是唯一)前台运行,Ctrl+C 优雅关闭;
  * --foreground 与缺省同义;--daemonize 明确报 not-supported(v0.2 不做后台化)。
+ *
+ * #6 外部编排文档常驻交接:--presets DIR / --registry FILE / --models FILE
+ * 装载外部预设目录、能力注册表、模型评分表(装载器与 workflow check 同源);
+ * 缺省回落 neoba.config.json 顶层 presets/registry/models 字段(相对路径相对
+ * config 文件所在目录解析),再缺省 = 内置 minimal + 缺省注册表(models 走
+ * <stateDir>/modelscore.json)。装载失败类型化报错(StartArtifactLoadError)
+ * 退出非 0,不静默降级。
  */
 
 import { DaemonPortInUse } from '../../daemon/index.ts';
@@ -10,20 +17,27 @@ import type { Command } from '../types.ts';
 export const startCommand: Command = {
   name: 'start',
   summary: '拉起 neoba daemon(前台运行,Ctrl+C 优雅关闭)',
-  usage: 'neoba start [--state-dir DIR] [--port N] [--foreground]',
+  usage:
+    'neoba start [--state-dir DIR] [--port N] [--presets DIR] [--registry FILE] [--models FILE] [--foreground]',
   async run(args, { io, deps }) {
-    const { flags } = parseArgs(args, ['state-dir', 'port']);
+    const { flags } = parseArgs(args, ['state-dir', 'port', 'presets', 'registry', 'models']);
     if (flagBool(flags, 'daemonize')) {
       throw new CliUsageError('--daemonize not-supported:v0.2 仅支持前台运行');
     }
 
     const stateDir = flagString(flags, 'state-dir');
     const port = flagInt(flags, 'port');
+    const presetsDir = flagString(flags, 'presets');
+    const registryFile = flagString(flags, 'registry');
+    const modelsFile = flagString(flags, 'models');
     let handle: Awaited<ReturnType<typeof deps.startDaemon>>;
     try {
       handle = await deps.startDaemon({
         ...(stateDir !== undefined ? { stateDir } : {}),
         ...(port !== undefined ? { port } : {}),
+        ...(presetsDir !== undefined ? { presetsPath: presetsDir } : {}),
+        ...(registryFile !== undefined ? { registryPath: registryFile } : {}),
+        ...(modelsFile !== undefined ? { modelsPath: modelsFile } : {}),
       });
     } catch (err) {
       if (err instanceof DaemonPortInUse) {

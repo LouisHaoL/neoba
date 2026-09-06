@@ -3,7 +3,7 @@
 多 Agent 协作协议：N 主控 harness × N 执行基座自由组合。协议即产品，daemon 只是参考实现。
 
 - 设计文档：[docs/neoba-design-v0.3.md](docs/neoba-design-v0.3.md)（历史版本 v0.1/v0.2 留档）
-- 状态：P0 协议冻结 + P1 最小闭环 + P2 编排与审批 + P3 多 session/多基座 + P4 观测与沙箱进阶 已全部落地（2026-09-06，全仓 690/690 测试(649 基线 + e2e 37 + issue 修复回归 4)）
+- 状态：P0 协议冻结 + P1 最小闭环 + P2 编排与审批 + P3 多 session/多基座 + P4 观测与沙箱进阶 已全部落地（2026-09-06，全仓 703/703 测试(649 基线 + e2e 37 + issue 修复回归 17)；#6 常驻装载外部编排文档）
 - 许可：[Apache-2.0](LICENSE)
 
 ## 目录约定
@@ -38,9 +38,24 @@ docs/       设计文档
 | P4 · M4:观测线 `events.list` + OpenAPI 3.1(`GET /openapi.json`,api-doc 一致性单测防漂移)+ SSE 事件流(replay+live 去重)+ 零构建只读 dashboard | ✅ |
 | P4 · M6:Linux keyring 后端(libsecret `secret-tool` 桥)+ `createSecretStore` 工厂 + `neoba.config.json` 生产接线 + doctor `keyringReady` | ✅ |
 | P4 · M7:microsandbox(Firecracker microVM)后端 + provider 工厂(memory/docker/microsandbox)+ warm pool(snapshot 回热,与 ResourceGate 共槽)+ 镜像配置注入 | ✅ |
-| 一致性测试:全仓 690/690(golden 01–08 零漂移回归 + e2e 子进程 32 + 驱动/审计回归) | ✅ |
+| 一致性测试:全仓 703/703(golden 01–08 零漂移回归 + e2e 子进程 + 驱动/审计回归) | ✅ |
+| #6 常驻装载:`neoba start --presets/--registry/--models` + config 等价字段,与 workflow check 同源装载器 | ✅ |
 
-运行示例:`neoba workflow check presets/examples/workflow.json --presets presets/examples --intent presets/examples/intent.json`。示例预设声明了 `model.tier`,请追加 `--models <模型注册表.json>`(口径与 daemon 一致:声明 model.tier 的工作流 check 时不传 `--models` 会报 `models_registry_missing` 且退出非 0,见 issue #5)。
+运行示例:
+
+- 排查:`neoba workflow check presets/examples/workflow.json --presets presets/examples --intent presets/examples/intent.json --models presets/examples/models.json`(示例预设声明了 `model.tier`,不传 `--models` 会报 `models_registry_missing` 且退出非 0,见 issue #5)
+- 常驻(#6):`neoba start --presets ops/presets --registry ops/capabilities.json --models ops/modelscore.json` —— 装载外部预设目录 / 能力注册表 / 模型评分表(装载器与 workflow check 同源),`workflow.run` 即可引用外部 preset;装载失败(文件不存在 / schema 不合 / 校验不过)类型化报错退出非 0,不静默降级
+- 等价配置(neoba.config.json 顶层,相对路径相对 config 文件所在目录解析;优先级 CLI flag > config > 缺省):
+
+  ```json
+  {
+    "presets": "ops/presets",
+    "registry": "ops/capabilities.json",
+    "models": "ops/modelscore.json"
+  }
+  ```
+
+  缺省(两处都未声明)= 内置 minimal 预设 + 内置注册表,models 走 `<stateDir>/modelscore.json`,行为零漂移。
 
 约束:TS 只用可剥离语法子集(无 enum/namespace/参数属性),类型导入用 `import type`,相对导入带 `.ts` 后缀——保证 `node` 直接执行,无构建步骤。
 

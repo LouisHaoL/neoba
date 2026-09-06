@@ -13,8 +13,19 @@ import { homedir as osHomedir } from 'node:os';
 
 import type { DoctorReport } from './types.ts';
 
-/** neoba daemon 配置(此处只约束 doctor 关心的字段,其余透传)。 */
+/**
+ * neoba daemon 配置(此处只约束 doctor 关心的字段,其余透传)。
+ * presets/registry/models(#6):CLI start 装配外部编排文档的等价 config 字段,
+ * 相对路径相对本 config 文件所在目录解析;CLI flag > config > 缺省(内置
+ * minimal、无 registry、models 走 daemon 缺省)。装载器同源 workflow check。
+ */
 export interface NeobaConfig {
+  /** 预设目录(载入其中全部 *.json,递归,同 workflow check --presets)。 */
+  presets?: string;
+  /** 能力注册表 JSON 文件。 */
+  registry?: string;
+  /** 模型评分表 JSON 文件。 */
+  models?: string;
   sandbox?: { provider?: string; [key: string]: unknown };
   doctor?: {
     lastRunAt?: string;
