@@ -14,7 +14,8 @@
  * 擦除:命中凭据语义的键一律替换为占位串,并把引用记入 README 的凭据清单。
  *
  * 预设加载只认 JSON(零第三方依赖,YAML 不做自研解析,见 capability/preset.ts
- * 头注);presets/ 目录下的 .yaml 是人读约定样例,导出前需先转成 JSON。
+ * 头注);目录里的 .yaml/.yml 不再静默忽略(#30):单列一条带转 JSON 指引的
+ * 明确错误 —— 按目录约定放置 YAML 的新用户此前只会得到"0 预设"而无提示。
  */
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -46,18 +47,33 @@ export async function loadPresetsFromDirs(dirs: readonly string[]): Promise<Pres
   const presets: Record<string, Preset> = {};
   const errors: PresetLoadError[] = [];
   for (const dir of dirs) {
-    let files: string[];
+    let jsonFiles: string[];
+    let yamlFiles: string[];
     try {
       const dirents = await readdir(dir, { withFileTypes: true, recursive: true });
-      files = dirents
+      jsonFiles = dirents
         .filter((d) => d.isFile() && d.name.endsWith('.json'))
+        .map((d) => join(d.parentPath, d.name))
+        .sort();
+      // .yaml/.yml 明确报错(#30):装载器零依赖只认 JSON,不静默忽略 ——
+      // 提示转成等价 .json(仓库 presets/planner.json、e2e-tester.json 即样例)。
+      yamlFiles = dirents
+        .filter((d) => d.isFile() && (d.name.endsWith('.yaml') || d.name.endsWith('.yml')))
         .map((d) => join(d.parentPath, d.name))
         .sort();
     } catch {
       errors.push({ path: dir, message: `预设目录不可读: ${dir}` });
       continue;
     }
-    for (const path of files) {
+    for (const path of yamlFiles) {
+      errors.push({
+        path,
+        message:
+          '预设文件不支持 YAML:装载器零依赖只认 JSON;请把该 .yaml/.yml 转成内容等价的 .json ' +
+          '(字段结构参考 presets/planner.json),或等待后续 YAML 支持',
+      });
+    }
+    for (const path of jsonFiles) {
       try {
         // 同目录常放 workflow/intent 文档:api 轴不是 preset/1.0 的直接跳过,不报错。
         const raw = JSON.parse(await readFile(path, 'utf8')) as unknown;

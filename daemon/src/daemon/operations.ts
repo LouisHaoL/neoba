@@ -296,11 +296,9 @@ export class Operations {
     // M3 双 token 模型:配置了注册表才签发会话 token;明文只在本次应答出现
     // 一次,注册表只落 sha256。缺省注册表 = 现语义(应答无 token 字段)。
     if (this.#ctx.tokens === undefined) return base;
-    const token = await this.#ctx.tokens.issue(
-      result.session.tenant,
-      result.session.session,
-      ...(this.#ctx.now !== undefined ? [this.#ctx.now] : []),
-    );
+    const token = await this.#ctx.tokens.issue(result.session.tenant, result.session.session, {
+      ...(this.#ctx.now !== undefined ? { now: this.#ctx.now } : {}),
+    });
     return { ...base, token };
   }
 

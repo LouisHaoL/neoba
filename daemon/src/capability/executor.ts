@@ -105,7 +105,14 @@ export class GrantExecutor {
         await this.record(state, agentId, 'granted', grant.cap, grant.scope);
       }
     } catch (err) {
+      // 审计补偿(#30):中途失败时,此前已落 granted 审计的条目补发 reclaimed,
+      // 否则事件日志与实际授予(整体回滚)永久背离,重试成功后同一 grant 出现
+      // 两条 granted 而无回收对账。先摘除 agent 保证不残留;单条补偿失败
+      // 吞掉(不顶掉原始错误、不中断其余补偿)。
       this.agents.delete(agentId);
+      for (const grant of state.grants) {
+        await this.record(state, agentId, 'reclaimed', grant.cap, grant.scope).catch(() => {});
+      }
       throw err;
     }
     return { manifest: this.manifest(agentId) as GrantManifest, mountIntents };

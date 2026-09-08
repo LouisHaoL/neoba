@@ -13,6 +13,9 @@ import { isTerminalStatus, planArtifactGc } from '../../artifacts/index.ts';
 import { flagBool, flagString, parseArgs } from '../args.ts';
 import type { Command } from '../types.ts';
 
+/** 已初始化状态目录的标记(任一存在即放行;防 --state-dir 打错路径静默建仓,#30)。 */
+const STATE_MARKERS = ['artifacts', 'events', 'daemon-state.json', 'tokens.json'] as const;
+
 export const pruneCommand: Command = {
   name: 'prune',
   summary: '工件仓库孤儿对象清理(默认 dry-run,--yes 才删;--plan 打印自动 GC 计划)',
@@ -23,6 +26,25 @@ export const pruneCommand: Command = {
     const planOnly = flagBool(flags, 'plan');
     const stateDir =
       flagString(flags, 'state-dir') ?? join(deps.homedir(), '.neoba');
+    // openRepository 会 mkdir recursive:#30 前置校验 state-dir 是已初始化的
+    // neoba 状态目录(含 artifacts/events 目录或 daemon-state.json/tokens.json
+    // 任一状态文件),否则报错退出 1 —— 打错路径不再"成功"清零并留下空仓库骨架。
+    let initialized = false;
+    if (await deps.fileExists(stateDir)) {
+      for (const marker of STATE_MARKERS) {
+        if (await deps.fileExists(join(stateDir, marker))) {
+          initialized = true;
+          break;
+        }
+      }
+    }
+    if (!initialized) {
+      io.err(
+        `neoba prune: state-dir 不是已初始化的 neoba 状态目录(缺 artifacts/events 目录或 daemon-state.json/tokens.json): ${stateDir}` +
+          ';如确要初始化新目录,先运行 neoba start,prune 不会代为建仓',
+      );
+      return 1;
+    }
     const repo = await deps.openRepository(join(stateDir, 'artifacts'));
     try {
       if (planOnly) {

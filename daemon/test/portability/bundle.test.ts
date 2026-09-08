@@ -1,7 +1,8 @@
 /**
  * portability 单元测试(§3.5g):三档导出内容差异、README 必备章节、
  * 铁律擦除(凭据键 → 占位 + 引用记录)、预设 JSON 往返(导出的 preset
- * 文件能被 parsePreset 重新解析)、loadPresetsFromDirs 递归/重名/坏文件。
+ * 文件能被 parsePreset 重新解析)、loadPresetsFromDirs 递归/重名/坏文件/
+ * YAML 显式报错(#30)。
  */
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
@@ -259,5 +260,35 @@ describe('portability:loadPresetsFromDirs', () => {
     assert.deepEqual(Object.keys(report.presets), []);
     assert.equal(report.errors.length, 1);
     assert.ok(report.errors[0]?.message.includes('不可读'));
+  });
+
+  it('目录含 .yaml/.yml(#30)→ 逐文件 PresetLoadError 带转 JSON 指引,不静默忽略', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'neoba-port-'));
+    roots.push(dir);
+    await writeFile(
+      join(dir, 'planner.yaml'),
+      'name: planner\ndescription: 人读样例(YAML 不再静默忽略)\n',
+      'utf8',
+    );
+    await mkdir(join(dir, 'sub'), { recursive: true });
+    await writeFile(join(dir, 'sub', 'e2e.yml'), 'name: e2e-tester\n', 'utf8');
+    await writeFile(
+      join(dir, 'alpha.json'),
+      JSON.stringify(minimalPresetDoc({ name: 'alpha' })),
+      'utf8',
+    );
+
+    const report = await loadPresetsFromDirs([dir]);
+    // 同目录 .json 不受影响,正常装载
+    assert.deepEqual(Object.keys(report.presets), ['alpha']);
+    // 两个 YAML 文件各报一条错,信息可定位且带"转成 .json"的修复指引
+    assert.equal(report.errors.length, 2);
+    const yamlErrors = report.errors.filter((e) => /\.ya?ml$/.test(e.path));
+    assert.equal(yamlErrors.length, 2);
+    for (const e of yamlErrors) {
+      assert.ok(e.message.includes('不支持 YAML'));
+      assert.ok(e.message.includes('JSON'), '指引应指明转成等价 JSON');
+      assert.ok(e.message.includes('presets/planner.json'), '指引应给出字段结构参考');
+    }
   });
 });
