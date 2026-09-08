@@ -1,6 +1,7 @@
 /**
  * doctor keyring 检测(M6):linux 探测 secret-tool 可用性;
  * win/mac 输出 N/A 不算失败;渲染同步。
+ * #30:退出码 1 且 stderr 非空 = 真错误(D-Bus 不可达等),与"无匹配"区分。
  */
 import assert from 'node:assert/strict';
 
@@ -55,6 +56,40 @@ test('Linux lookup 无匹配(退出码 1)也算工具可用', async () => {
   });
   assertCheck(report.checks, 'keyring', 'ok');
   assert.equal(report.keyringReady, true);
+});
+
+test('Linux lookup 退出码 1 且 stderr 非空(#30)= 真错误 → fail,不再混判为无匹配', async () => {
+  const report = await runDoctor({
+    probe: fakeProbe(linuxRoutes({
+      [PROBE_LINE]: { code: 1, stdout: '', stderr: 'Error: cannot autolaunch D-Bus without X11 $DISPLAY\n' },
+    })),
+    systemInfo: linuxInfo(),
+  });
+  assertCheck(report.checks, 'keyring', 'fail');
+  assert.equal(report.keyringReady, false);
+  const check = report.checks.find((c) => c.id === 'keyring');
+  assert.ok(check?.detail.includes('D-Bus'), 'detail 应带 stderr 首行,而非"可用"');
+  assert.ok(check?.suggestion?.includes('libsecret'));
+  assert.ok(renderReport(report).includes('Secrets keyring: 不可用'));
+});
+
+test('Linux lookup 退出码 1 + stderr 空(ok)与 + stderr 非空(fail)两条路径互斥', async () => {
+  // 同一退出码、唯一区分点是 stderr:确保空串(含纯空白)仍按"无匹配"放行。
+  const okReport = await runDoctor({
+    probe: fakeProbe(linuxRoutes({ [PROBE_LINE]: { code: 1, stdout: '', stderr: '' } })),
+    systemInfo: linuxInfo(),
+  });
+  assertCheck(okReport.checks, 'keyring', 'ok');
+  const blankReport = await runDoctor({
+    probe: fakeProbe(linuxRoutes({ [PROBE_LINE]: { code: 1, stdout: '', stderr: '\n' } })),
+    systemInfo: linuxInfo(),
+  });
+  assertCheck(blankReport.checks, 'keyring', 'ok');
+  const errReport = await runDoctor({
+    probe: fakeProbe(linuxRoutes({ [PROBE_LINE]: { code: 1, stdout: '', stderr: 'gnome-keyring: locked\n' } })),
+    systemInfo: linuxInfo(),
+  });
+  assertCheck(errReport.checks, 'keyring', 'fail');
 });
 
 test('Linux secret-tool 缺失 → keyring 检测 fail,keyringReady=false 并给建议', async () => {

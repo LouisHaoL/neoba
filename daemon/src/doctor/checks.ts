@@ -398,6 +398,10 @@ export async function checkDockerSeccompUserns(
 /** doctor 的 keyring 探测参数(与 KeyringSecretBackend 的 lookup 属性一致)。 */
 export const KEYRING_PROBE_ARGS = ['lookup', 'service', 'neoba'] as const;
 
+/** keyring 检测失败时的统一修复建议。 */
+const KEYRING_SUGGESTION =
+  '安装 libsecret 工具(Debian/Ubuntu: apt install libsecret-1-0 libsecret-tools;RHEL: dnf install libsecret),并确认 gnome-keyring 等秘钥环服务在运行';
+
 export async function checkKeyring(ctx: CheckContext): Promise<CheckResult> {
   const platformName = ctx.info.platform;
   // secret-tool 是 Linux(libsecret)专属;win/mac 走各自默认后端
@@ -409,10 +413,14 @@ export async function checkKeyring(ctx: CheckContext): Promise<CheckResult> {
       `N/A:${platformName} 不使用 libsecret keyring,secret 后端走平台默认`,
     );
   }
-  // 探测只做一次 lookup(无副作用,不写 keyring):secret-tool 存在且
-  // keyring 服务应答即为可用 —— 退出码 0(有匹配)/ 1(无匹配)都算。
+  // 探测只做一次 lookup(无副作用,不写 keyring):
+  // - 退出码 0 = 有匹配,工具与 keyring 服务均可用;
+  // - 退出码 1 且 stderr 为空 = "无匹配",keyring 服务应答正常,工具可用;
+  // - 退出码 1 且 stderr 非空 = D-Bus 不可达 / gnome-keyring 锁死等真实错误
+  //   (#30,不能再与"无匹配"混判,否则无头机假阳性 ok、接线即失败);
+  // - 其他退出码 = 工具缺失/异常,fail。
   const r = await ctx.probe('secret-tool', [...KEYRING_PROBE_ARGS]);
-  if (r.code === 0 || r.code === 1) {
+  if (r.code === 0 || (r.code === 1 && firstLine(r.stderr) === '')) {
     return make('keyring', 'ok', 'secret-tool(libsecret)可用,keyring 后端可接线');
   }
   const reason = firstLine(r.stderr) !== '' ? firstLine(r.stderr) : `退出码 ${r.code}`;
@@ -420,7 +428,7 @@ export async function checkKeyring(ctx: CheckContext): Promise<CheckResult> {
     'keyring',
     'fail',
     `secret-tool 不可用:${reason}`,
-    '安装 libsecret 工具(Debian/Ubuntu: apt install libsecret-1-0 libsecret-tools;RHEL: dnf install libsecret),并确认 gnome-keyring 等秘钥环服务在运行',
+    KEYRING_SUGGESTION,
   );
 }
 

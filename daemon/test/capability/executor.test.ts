@@ -137,6 +137,61 @@ describe('基线授予生成(P1)', () => {
   });
 });
 
+describe('applyBaseline 审计补偿(#30:事件日志与实际授予对账)', () => {
+  it('中途失败:此前已落 granted 审计的条目补发 reclaimed,agent 不残留半套授予', async () => {
+    const { events, sink } = makeSink();
+    const ex = new GrantExecutor(REG, { sink, now: () => NOW });
+    await assert.rejects(
+      ex.applyBaseline('task-30/a', presetWith([
+        { cap: 'fs:workdir', scope: 'rw' },
+        { cap: 'mcp:nonexistent', scope: 'read' }, // 第二条才炸
+      ])),
+      CapUnknown,
+    );
+    // 事件序:第一条 granted 后紧跟补偿 reclaimed(授予整体回滚)
+    assert.deepEqual(
+      events.map((e) => [e.cap, e.event]),
+      [['fs:workdir', 'granted'], ['fs:workdir', 'reclaimed']],
+    );
+    // agent 已摘除,查询口径同样干净
+    assert.equal(ex.manifest('task-30/a'), undefined);
+    assert.deepEqual(ex.grantsOf('task-30/a'), []);
+  });
+
+  it('重试成功后无"双 granted 无回收"背离:同一 cap 事件序 granted→reclaimed→granted', async () => {
+    const { events, sink } = makeSink();
+    const ex = new GrantExecutor(REG, { sink, now: () => NOW });
+    await assert.rejects(
+      ex.applyBaseline('task-30/b', presetWith([
+        { cap: 'fs:workdir', scope: 'rw' },
+        { cap: 'mcp:nonexistent', scope: 'read' },
+      ])),
+      CapUnknown,
+    );
+    const { manifest } = await ex.applyBaseline('task-30/b', presetWith([
+      { cap: 'fs:workdir', scope: 'rw' },
+    ]));
+    assert.deepEqual(manifest.grants, [
+      { cap: 'fs:workdir', scope: 'rw', source: 'baseline', ttl: null },
+    ]);
+    // sink 事件序对账:失败轮 granted + 补偿 reclaimed,成功轮一条 granted ——
+    // 不存在两条 granted 之间无回收的序列。
+    assert.deepEqual(
+      events.map((e) => [e.cap, e.event]),
+      [
+        ['fs:workdir', 'granted'],
+        ['fs:workdir', 'reclaimed'],
+        ['fs:workdir', 'granted'],
+      ],
+    );
+    // 重试是新 state:manifest 快照只含成功轮的 granted 审计。
+    assert.deepEqual(
+      manifest.audit.map((a) => [a.cap, a.event]),
+      [['fs:workdir', 'granted']],
+    );
+  });
+});
+
 describe('grant / revoke 原语与查询', () => {
   it('grant 后可查,revoke 后查询为空且发 reclaimed 审计', async () => {
     const { events, sink } = makeSink();

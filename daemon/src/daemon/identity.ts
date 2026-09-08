@@ -26,12 +26,14 @@ export interface RequestIdentity {
 /** admin 身份常量(operations.call 缺省第三参,现语义完全不变)。 */
 export const ADMIN_IDENTITY: RequestIdentity = { kind: 'admin', tenant: null, session: null };
 
-/** tokens.json 单条记录(只存 hash,永不存明文)。 */
+/** tokens.json 单条记录(只存 hash,永不存明文;expiresAt 为 #30 可选过期,缺省不带 = 不过期)。 */
 interface StoredToken {
   readonly hash: string;
   readonly tenant: string;
   readonly session: string;
   readonly issuedAt: string;
+  /** 过期时刻(ISO);缺省(无此键)= 永不过期(现行为,daemon 接线暂用缺省)。 */
+  readonly expiresAt?: string;
 }
 
 interface TokensFile {
@@ -79,23 +81,45 @@ export class TokenRegistry {
     return registry;
   }
 
-  /** 签发会话 token:明文只在返回值出现一次;同 (tenant, session) 旧 token 失效。 */
-  async issue(tenant: string, session: string, now: () => Date = () => new Date()): Promise<string> {
+  /**
+   * 签发会话 token:明文只在返回值出现一次;同 (tenant, session) 旧 token 失效。
+   * ttlMs 给定时落 expiresAt(#30):到期后 verify 拒绝(fail-closed),
+   * 不给 = 永不过期(现行为,daemon 接线暂用缺省)。
+   */
+  async issue(
+    tenant: string,
+    session: string,
+    opts: { ttlMs?: number; now?: () => Date } = {},
+  ): Promise<string> {
+    const now = opts.now ?? (() => new Date());
     const token = randomBytes(32).toString('base64url');
     const hash = sha256Hex(token);
     // 同一会话重握手:替换旧条目(一个会话同时只持一枚有效 token)。
     for (const [key, record] of this.#tokens) {
       if (record.tenant === tenant && record.session === session) this.#tokens.delete(key);
     }
-    this.#tokens.set(hash, { hash, tenant, session, issuedAt: now().toISOString() });
+    const issued = now();
+    const record: StoredToken = {
+      hash,
+      tenant,
+      session,
+      issuedAt: issued.toISOString(),
+      ...(opts.ttlMs !== undefined ? { expiresAt: new Date(issued.getTime() + opts.ttlMs).toISOString() } : {}),
+    };
+    this.#tokens.set(hash, record);
     await this.#persist();
     return token;
   }
 
-  /** 校验呈现的 token:命中返回 session 身份,否则 null(调用方决定 401)。 */
-  verify(presented: string): RequestIdentity | null {
+  /** 校验呈现的 token:命中且未过期返回 session 身份,否则 null(调用方决定 401)。 */
+  verify(presented: string, now: () => Date = () => new Date()): RequestIdentity | null {
     const record = this.#tokens.get(sha256Hex(presented));
     if (record === undefined) return null;
+    // 过期即拒(#30):缺 expiresAt = 永不过期;脏值解析失败同样 fail-closed。
+    if (record.expiresAt !== undefined) {
+      const expires = Date.parse(record.expiresAt);
+      if (!Number.isFinite(expires) || expires <= now().getTime()) return null;
+    }
     return { kind: 'session', tenant: record.tenant, session: record.session };
   }
 

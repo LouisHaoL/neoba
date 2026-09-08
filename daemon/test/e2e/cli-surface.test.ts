@@ -150,9 +150,26 @@ describe('e2e · CLI prune / doctor', () => {
     assert.equal(yes.code, 0, `${yes.stdout}\n${yes.stderr}`);
   });
 
-  it('doctor:本机环境检测 exit 0,报告含后端判定', async () => {
-    const out = await runNeoba(['doctor'], { timeoutMs: 60_000 });
-    assert.equal(out.code, 0, `${out.stdout}\n${out.stderr}`);
+  it('prune 未初始化目录(#30):报错退出 1,不建仓库骨架', async () => {
+    const dir = keep(await mkdtemp(join(tmpdir(), 'neoba-e2e-prune-uninit-')));
+    const out = await runNeoba(['prune', '--state-dir', dir, '--yes']);
+    assert.equal(out.code, 1, `未初始化目录应退出 1:${out.stdout}\n${out.stderr}`);
+    assert.match(out.stderr, /已初始化/);
+    const fs = await import('node:fs/promises');
+    assert.deepEqual(await fs.readdir(dir), [], '不应在目标目录留下仓库骨架');
+  });
+
+  it('doctor --json(#30):退出码与报告 fail 数对账,ok 字段一致', async () => {
+    // 新语义下退出码取决于本机是否有 fail 级检查项:CI/开发机环境各异,
+    // 锚定"退出码 ↔ 报告内容 ↔ ok 字段"三者一致,而非硬编码 0。
+    const out = await runNeoba(['doctor', '--json'], { timeoutMs: 60_000 });
+    const report = JSON.parse(out.stdout) as {
+      ok: boolean;
+      checks: { severity: string }[];
+    };
+    const failCount = report.checks.filter((c) => c.severity === 'fail').length;
+    assert.equal(report.ok, failCount === 0, 'ok 字段 = 无 fail 级检查项');
+    assert.equal(out.code, failCount === 0 ? 0 : 1, `退出码应与 fail 数一致(fail=${failCount})\n${out.stderr}`);
   });
 });
 

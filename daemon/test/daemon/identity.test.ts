@@ -1,9 +1,11 @@
 /**
  * M3 双 token 模型单元测试:TokenRegistry 发放/校验/持久化恢复/吊销/
  * 同会话重握手换 token/损坏文件 fail-closed,及 resolveIdentity 的
- * bootstrap=admin 语义。
+ * bootstrap=admin 语义;#30 追加 ttl 过期语义(到期拒、脏值 fail-closed、
+ * 无 ttl 永不过期、重启恢复后仍生效)。
  */
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -93,6 +95,69 @@ describe('TokenRegistry(§6 M3 双 token 模型)', () => {
   it('缺文件 = 首次启动空表', async () => {
     const { registry } = await open();
     assert.equal(registry.size, 0);
+  });
+});
+
+describe('TokenRegistry 过期(#30:issue 支持 ttlMs,verify fail-closed)', () => {
+  const T0 = new Date('2026-09-04T12:00:00Z');
+
+  it('带 ttlMs:到期前 verify 命中,到期后返回 null', async () => {
+    const { registry } = await open();
+    const token = await registry.issue('acme', 'dev-1', {
+      ttlMs: 60_000,
+      now: () => T0,
+    });
+    // 到期前(ttl 内任一时刻)仍有效
+    assert.deepEqual(registry.verify(token, () => new Date(T0.getTime() + 59_999)), {
+      kind: 'session', tenant: 'acme', session: 'dev-1',
+    });
+    // 到期时刻(<=)即拒
+    assert.equal(registry.verify(token, () => new Date(T0.getTime() + 60_000)), null);
+    assert.equal(registry.verify(token, () => new Date(T0.getTime() + 61_000)), null);
+  });
+
+  it('带 ttlMs 的记录落盘含 expiresAt;无 ttl 不落该键 = 永不过期', async () => {
+    const { registry, dir } = await open();
+    const ttlToken = await registry.issue('acme', 'with-ttl', { ttlMs: 1_000, now: () => T0 });
+    const plainToken = await registry.issue('acme', 'no-ttl', { now: () => T0 });
+    const raw = await readFile(join(dir, 'tokens.json'), 'utf8');
+    const parsed = JSON.parse(raw) as { tokens: { session: string; expiresAt?: string }[] };
+    const withTtl = parsed.tokens.find((t) => t.session === 'with-ttl');
+    const noTtl = parsed.tokens.find((t) => t.session === 'no-ttl');
+    assert.equal(withTtl?.expiresAt, '2026-09-04T12:00:01.000Z');
+    assert.equal(noTtl?.expiresAt, undefined);
+    // 无 ttl:任意远的将来仍有效(现行为不变);对照 ttl token 同时点已过期。
+    assert.deepEqual(registry.verify(plainToken, () => new Date('2126-01-01T00:00:00Z')), {
+      kind: 'session', tenant: 'acme', session: 'no-ttl',
+    });
+    assert.equal(registry.verify(ttlToken, () => new Date(T0.getTime() + 1_001)), null);
+  });
+
+  it('脏 expiresAt(非法 ISO)→ fail-closed 返回 null', async () => {
+    const { dir } = await open();
+    const token = 'presented-plain';
+    const hash = createHash('sha256').update(token, 'utf8').digest('hex');
+    await writeFile(
+      join(dir, 'tokens.json'),
+      JSON.stringify({
+        api: 'neoba-tokens/1.0',
+        tokens: [{ hash, tenant: 'acme', session: 'dev-1', issuedAt: T0.toISOString(), expiresAt: 'not-a-date' }],
+      }),
+      'utf8',
+    );
+    const registry = await TokenRegistry.open(dir);
+    assert.equal(registry.verify(token), null, '解析失败的过期时刻必须按已过期处理');
+  });
+
+  it('重启恢复后过期语义仍生效:重新 open,到期后 verify 返回 null', async () => {
+    const { registry, dir } = await open();
+    const token = await registry.issue('acme', 'dev-1', { ttlMs: 60_000, now: () => T0 });
+    const reopened = await TokenRegistry.open(dir);
+    assert.deepEqual(reopened.verify(token, () => new Date(T0.getTime() + 1_000)), {
+      kind: 'session', tenant: 'acme', session: 'dev-1',
+    });
+    assert.equal(reopened.verify(token, () => new Date(T0.getTime() + 60_001)), null);
+    void registry;
   });
 });
 

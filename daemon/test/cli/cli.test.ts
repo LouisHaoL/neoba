@@ -1,7 +1,8 @@
 /**
  * CLI 集成测试(§3.10):--help/--version、未知命令退出码、doctor --json
- * 在假探针下的输出结构、doctor --write 落配置、status 对缺失/损坏/在/不在
- * 状态的优雅处理、prune dry-run 不删 + --yes 真删(真实 CAS 仓库)。
+ * 在假探针下的输出结构与退出码(#30:有 fail 级检查项退出 1,--json 附 ok)、
+ * doctor --write 落配置、status 对缺失/损坏/在/不在状态的优雅处理、
+ * prune dry-run 不删 + --yes 真删(真实 CAS 仓库)+ 未初始化目录拒跑。
  * 不做真实 startDaemon 长驻测试;探活与仓库经 deps 注入。
  */
 import assert from 'node:assert/strict';
@@ -52,6 +53,33 @@ const fakeProbe = async (): Promise<{ code: number; stdout: string; stderr: stri
   stdout: '',
   stderr: 'command not found',
 });
+
+/**
+ * 全绿探针(#30):按命令行路由回成功结果(linux / win32 两套命令都铺,
+ * 跨平台可跑)。不能无脑回 code 0 —— wsl-status 等检查要解析 stdout 内容。
+ */
+const GREEN_ROUTES: Record<string, { code: number; stdout: string; stderr: string }> = {
+  'uname -r': { code: 0, stdout: '6.8.0-40-generic\n', stderr: '' },
+  'docker --version': { code: 0, stdout: 'Docker version 27.3.1, build a...\n', stderr: '' },
+  'docker info': { code: 0, stdout: 'Server Version: 27.3.1\n', stderr: '' },
+  'docker compose version': { code: 0, stdout: 'Docker Compose version v2.29.7\n', stderr: '' },
+  'unshare --user true': { code: 0, stdout: '', stderr: '' },
+  'docker info --format {{json .SecurityOptions}}': {
+    code: 0, stdout: '["name=seccomp,profile=unconfined"]\n', stderr: '',
+  },
+  'secret-tool lookup service neoba': { code: 0, stdout: 'secret-value\n', stderr: '' },
+  'msb --version': { code: 0, stdout: 'msb 0.1.8\n', stderr: '' },
+  'wsl.exe --status': { code: 0, stdout: '默认版本: 2\n', stderr: '' },
+  'wsl.exe unshare --user true': { code: 0, stdout: '', stderr: '' },
+  'wsl.exe docker --version': { code: 0, stdout: 'Docker version 27.3.1\n', stderr: '' },
+  'wsl.exe docker info': { code: 0, stdout: 'Server Version: 27.3.1\n', stderr: '' },
+  'powershell.exe -NoProfile -Command (Get-CimInstance Win32_ComputerSystem).HypervisorPresent': {
+    code: 0, stdout: 'True\n', stderr: '',
+  },
+};
+
+const greenProbe: CliDeps['execProbe'] = async (cmd, args) =>
+  GREEN_ROUTES[[cmd, ...args].join(' ')] ?? { code: 0, stdout: '', stderr: '' };
 
 async function makeDeps(overrides: Partial<CliDeps> = {}): Promise<CliDeps> {
   return await defaultDeps({ execProbe: fakeProbe, version: '9.9.9-test', ...overrides });
@@ -113,9 +141,9 @@ describe('cli:全局', () => {
 });
 
 describe('cli:doctor', () => {
-  it('--json 在假探针下输出结构化报告', async () => {
+  it('--json 在全绿探针下退出 0,ok:true 且报告结构完整', async () => {
     const io = makeIo();
-    const code = await runCli(['doctor', '--json'], io, await makeDeps());
+    const code = await runCli(['doctor', '--json'], io, await makeDeps({ execProbe: greenProbe }));
     assert.equal(code, 0);
     assert.equal(io.outLines.length, 1);
     const report = JSON.parse(io.outLines[0] ?? '{}') as Record<string, unknown>;
@@ -128,11 +156,38 @@ describe('cli:doctor', () => {
     assert.equal(typeof report['dataPlaneCrossBoundary'], 'boolean');
     const platform = report['platform'] as Record<string, unknown>;
     assert.equal(typeof platform['platform'], 'string');
+    // #30:无 fail 级检查项 → 顶层 ok 为 true(退出码 0 的同一口径)。
+    assert.equal(report['ok'], true);
+  });
+
+  it('存在 fail 级检查项:退出码 1,--json ok:false(#30)', async () => {
+    const io = makeIo();
+    const code = await runCli(['doctor', '--json'], io, await makeDeps());
+    assert.equal(code, 1);
+    const report = JSON.parse(io.outLines[0] ?? '{}') as Record<string, unknown>;
+    const checks = report['checks'] as { severity: string }[];
+    assert.ok(checks.some((c) => c.severity === 'fail'), '假探针下应有 fail 级检查项');
+    assert.equal(report['ok'], false);
+    // 人读渲染路径同一退出码口径。
+    const io2 = makeIo();
+    assert.equal(await runCli(['doctor'], io2, await makeDeps()), 1);
+  });
+
+  it('仅 warn/unknown 不算失败:退出码仍 0(#30 语义边界)', async () => {
+    // 全绿探针下 keyring/msb(按平台)与 data-plane 落 unknown,不阻塞退出码。
+    const io = makeIo();
+    const code = await runCli(['doctor', '--json'], io, await makeDeps({ execProbe: greenProbe }));
+    const report = JSON.parse(io.outLines[0] ?? '{}') as { checks: { severity: string }[] };
+    assert.ok(
+      report.checks.some((c) => c.severity === 'unknown' || c.severity === 'warn'),
+      '场景里应有非 ok 非 fail 的检查项',
+    );
+    assert.equal(code, 0);
   });
 
   it('默认人读渲染(renderReport)', async () => {
     const io = makeIo();
-    const code = await runCli(['doctor'], io, await makeDeps());
+    const code = await runCli(['doctor'], io, await makeDeps({ execProbe: greenProbe }));
     assert.equal(code, 0);
     const text = io.outLines.join('\n');
     assert.ok(text.includes('neoba doctor 环境检测报告'));
@@ -147,7 +202,7 @@ describe('cli:doctor', () => {
     const code = await runCli(
       ['doctor', '--write', '--json'],
       io,
-      await makeDeps({ defaultConfigPath: () => configPath }),
+      await makeDeps({ execProbe: greenProbe, defaultConfigPath: () => configPath }),
     );
     assert.equal(code, 0);
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
@@ -273,8 +328,22 @@ describe('cli:prune', () => {
     assert.equal((await listFiles(join(stateDir, 'artifacts', 'objects'))).length, 0);
   });
 
-  it('空仓库 --yes:无事发生,退出码 0', async () => {
+  it('未初始化的空目录(#30):报错退出 1,不静默建仓', async () => {
     const stateDir = await makeTmp('prune');
+    const io = makeIo();
+    const code = await runCli(['prune', '--state-dir', stateDir, '--yes'], io, await makeDeps());
+    assert.equal(code, 1);
+    const errText = io.errLines.join('\n');
+    assert.ok(errText.includes('已初始化'), '报错应说明 state-dir 未初始化');
+    assert.ok(errText.includes(stateDir), '报错应带上实际路径');
+    // 防静默建仓:目录里不留 openRepository 的仓库骨架。
+    assert.deepEqual(await readdir(stateDir).catch(() => ['<absent>']), []);
+  });
+
+  it('有初始化标记的空仓库 --yes:无事发生,退出码 0', async () => {
+    const stateDir = await makeTmp('prune');
+    // 任一标记即可:仅放一个状态文件,不建 artifacts 目录也应放行。
+    await writeFile(join(stateDir, 'daemon-state.json'), '{}', 'utf8');
     const io = makeIo();
     const code = await runCli(['prune', '--state-dir', stateDir, '--yes'], io, await makeDeps());
     assert.equal(code, 0);
@@ -333,6 +402,8 @@ describe('cli:未知 flag 与命令级 --help(issue #28)', () => {
 
   it('合法 flag 调用不受影响:prune --state-dir DIR --plan(值型 + 布尔混合)', async () => {
     const stateDir = await makeTmp('plan');
+    // #30 前置校验:合法调用的本意是"flag 解析与执行路径通",先落初始化标记。
+    await writeFile(join(stateDir, 'tokens.json'), '{"api":"neoba-tokens/1.0","tokens":[]}', 'utf8');
     const io = makeIo();
     const code = await runCli(['prune', '--state-dir', stateDir, '--plan'], io, await makeDeps());
     assert.equal(code, 0);
